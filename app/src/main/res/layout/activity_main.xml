@@ -1,13 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/pc_bg_dark"
     android:orientation="vertical">
 
-    <androidx.appcompat.widget.Toolbar
+    <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
-        android:layout_height="?attr/actionBarSize" />
+        android:layout_height="?attr/actionBarSize"
+        android:background="@color/pc_surface"
+        app:titleTextColor="@color/pc_text_primary" />
 
     <ScrollView
         android:layout_width="match_parent"
@@ -21,89 +25,229 @@
             android:orientation="vertical"
             android:padding="16dp">
 
-            <LinearLayout
+            <!-- Brand Header Card -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingBottom="12dp">
+                android:layout_marginBottom="14dp"
+                app:cardBackgroundColor="@color/pc_surface"
+                app:cardCornerRadius="16dp"
+                app:strokeColor="@color/pc_border"
+                app:strokeWidth="1dp">
 
-                <ImageView
-                    android:layout_width="36dp"
-                    android:layout_height="36dp"
-                    android:contentDescription="PlusCast Logo"
-                    android:src="@android:drawable/ic_menu_slideshow" />
-
-                <TextView
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:text="PlusCast"
-                    android:textSize="22sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:padding="14dp">
 
-            <Button
-                android:id="@+id/cardLocalMedia"
+                    <ImageView
+                        android:layout_width="42dp"
+                        android:layout_height="42dp"
+                        android:contentDescription="PlusCast Logo"
+                        android:src="@drawable/ic_pluscast_logo" />
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="PlusCast"
+                            android:textColor="@color/pc_text_primary"
+                            android:textSize="20sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="IPTV, Local Media &amp; TV Casting"
+                            android:textColor="@color/pc_text_secondary"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Media Sources Card -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="14dp"
-                android:text="Local Media (Phone Video / Audio)" />
+                app:cardBackgroundColor="@color/pc_surface"
+                app:cardCornerRadius="16dp"
+                app:strokeColor="@color/pc_border"
+                app:strokeWidth="1dp">
 
-            <EditText
-                android:id="@+id/etStreamUrl"
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="14dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="10dp"
+                        android:text="MEDIA SOURCES"
+                        android:textColor="@color/pc_accent_cyan"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/cardLocalMedia"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginBottom="10dp"
+                        android:text="Local Media (Phone Video / Audio)"
+                        android:textAllCaps="false"
+                        android:textColor="@color/pc_text_primary"
+                        app:backgroundTint="@color/pc_surface_elevated"
+                        app:cornerRadius="12dp"
+                        app:strokeColor="@color/pc_border"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/cardYoutube"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:text="YouTube Player"
+                        android:textAllCaps="false"
+                        android:textColor="@color/pc_text_primary"
+                        app:backgroundTint="@color/pc_surface_elevated"
+                        app:cornerRadius="12dp"
+                        app:strokeColor="@color/pc_border"
+                        app:strokeWidth="1dp" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Direct Stream Card -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="Direct Stream URL (M3U8 / MP4)"
-                android:inputType="textUri"
-                android:maxLines="1" />
-
-            <Button
-                android:id="@+id/btnPlayStream"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
                 android:layout_marginBottom="14dp"
-                android:text="Play Direct Stream" />
+                app:cardBackgroundColor="@color/pc_surface"
+                app:cardCornerRadius="16dp"
+                app:strokeColor="@color/pc_border"
+                app:strokeWidth="1dp">
 
-            <EditText
-                android:id="@+id/etM3uUrl"
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="14dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="8dp"
+                        android:text="DIRECT STREAM"
+                        android:textColor="@color/pc_accent_cyan"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <EditText
+                        android:id="@+id/etStreamUrl"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="@color/pc_surface_elevated"
+                        android:hint="Direct Stream URL (M3U8 / MP4)"
+                        android:inputType="textUri"
+                        android:maxLines="1"
+                        android:paddingHorizontal="12dp"
+                        android:textColor="@color/pc_text_primary"
+                        android:textColorHint="@color/pc_text_secondary"
+                        android:textSize="14sp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnPlayStream"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="10dp"
+                        android:text="Play Direct Stream"
+                        android:textAllCaps="false"
+                        android:textColor="@color/pc_text_primary"
+                        app:backgroundTint="@color/pc_primary"
+                        app:cornerRadius="12dp" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- IPTV Playlist & Channels Card -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="M3U Playlist URL"
-                android:inputType="textUri"
-                android:maxLines="1" />
+                app:cardBackgroundColor="@color/pc_surface"
+                app:cardCornerRadius="16dp"
+                app:strokeColor="@color/pc_border"
+                app:strokeWidth="1dp">
 
-            <Button
-                android:id="@+id/btnLoadIptv"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:layout_marginBottom="8dp"
-                android:text="Load / Update IPTV Channels" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="14dp">
 
-            <EditText
-                android:id="@+id/etSearchChannel"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:layout_marginBottom="6dp"
-                android:hint="Search channel name or group..."
-                android:inputType="text"
-                android:maxLines="1" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="8dp"
+                        android:text="IPTV PLAYLIST"
+                        android:textColor="@color/pc_accent_cyan"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
 
-            <ListView
-                android:id="@+id/lvIptvChannels"
-                android:layout_width="match_parent"
-                android:layout_height="220dp"
-                android:layout_marginBottom="14dp"
-                android:nestedScrollingEnabled="true" />
+                    <EditText
+                        android:id="@+id/etM3uUrl"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:background="@color/pc_surface_elevated"
+                        android:hint="M3U Playlist URL"
+                        android:inputType="textUri"
+                        android:maxLines="1"
+                        android:paddingHorizontal="12dp"
+                        android:textColor="@color/pc_text_primary"
+                        android:textColorHint="@color/pc_text_secondary"
+                        android:textSize="14sp" />
 
-            <Button
-                android:id="@+id/cardYoutube"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="YouTube Player" />
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnLoadIptv"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="10dp"
+                        android:text="Load / Update IPTV Channels"
+                        android:textAllCaps="false"
+                        android:textColor="@color/pc_text_primary"
+                        app:backgroundTint="@color/pc_primary"
+                        app:cornerRadius="12dp" />
+
+                    <EditText
+                        android:id="@+id/etSearchChannel"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="10dp"
+                        android:background="@color/pc_surface_elevated"
+                        android:hint="Search channel name or group..."
+                        android:inputType="text"
+                        android:maxLines="1"
+                        android:paddingHorizontal="12dp"
+                        android:textColor="@color/pc_text_primary"
+                        android:textColorHint="@color/pc_text_secondary"
+                        android:textSize="14sp" />
+
+                    <ListView
+                        android:id="@+id/lvIptvChannels"
+                        android:layout_width="match_parent"
+                        android:layout_height="240dp"
+                        android:layout_marginTop="10dp"
+                        android:divider="@color/pc_border"
+                        android:dividerHeight="1dp"
+                        android:nestedScrollingEnabled="true" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
 
         </LinearLayout>
     </ScrollView>
