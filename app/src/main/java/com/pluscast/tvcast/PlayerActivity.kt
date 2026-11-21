@@ -1,7 +1,14 @@
 package com.pluscast.tvcast
 
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.MediaItem
@@ -33,7 +40,47 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
 
+        addRotateButton()
         tryCastMediaIfConnected()
+    }
+
+    private fun addRotateButton() {
+        try {
+            val rootView = findViewById<ViewGroup>(android.R.id.content)
+            val rotateButton = ImageButton(this).apply {
+                setImageResource(android.R.drawable.ic_menu_rotate)
+                setColorFilter(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#80000000"))
+                contentDescription = "Rotate Screen"
+                val sizePx = (48 * resources.displayMetrics.density).toInt()
+                val marginPx = (16 * resources.displayMetrics.density).toInt()
+                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    topMargin = marginPx
+                    rightMargin = marginPx
+                }
+                setOnClickListener {
+                    toggleScreenOrientation()
+                }
+            }
+            rootView.addView(rotateButton)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun toggleScreenOrientation() {
+        val currentOrientation = resources.configuration.orientation
+        requestedOrientation = if (currentOrientation == Configuration.ORIENTATION_LANDSCAPE) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        playerView?.requestLayout()
     }
 
     override fun onStart() {
