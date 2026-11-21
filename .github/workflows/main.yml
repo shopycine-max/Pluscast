@@ -31,7 +31,7 @@ jobs:
             chmod +x ./gradlew
           fi
 
-            - name: Build Debug APK
+      - name: Build Debug APK
         run: |
           set -o pipefail
           if [ -f "./gradlew" ]; then
@@ -47,7 +47,6 @@ jobs:
             grep -nE "^e:|error:|Unresolved|expecting|mismatch|cannot find symbol" build.log | head -n 40
             exit 1
           }
-
 
       - name: Upload Debug APK Artifact
         if: success()
