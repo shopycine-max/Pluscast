@@ -32,7 +32,7 @@
                     android:layout_width="36dp"
                     android:layout_height="36dp"
                     android:contentDescription="PlusCast Logo"
-                    android:src="@drawable/ic_pluscast_logo" />
+                    android:src="@android:drawable/ic_menu_slideshow" />
 
                 <TextView
                     android:layout_width="wrap_content"
