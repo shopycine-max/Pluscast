@@ -6,25 +6,24 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
 import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.framework.CastContext
-import com.google.android.gms.cast.framework.CastSession
-import com.pluscast.tvcast.databinding.ActivityPlayerBinding
 
 class PlayerActivity : AppCompatActivity() {
 
-    private lateinit var binding: ActivityPlayerBinding
     private var player: ExoPlayer? = null
+    private var playerView: PlayerView? = null
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast Media"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityPlayerBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        setContentView(R.layout.activity_player)
 
+        playerView = findViewById(R.id.playerView)
         mediaUrl = intent.getStringExtra("MEDIA_URL").orEmpty()
         mediaTitle = intent.getStringExtra("MEDIA_TITLE") ?: "PlusCast Media"
 
@@ -42,7 +41,7 @@ class PlayerActivity : AppCompatActivity() {
         try {
             val exoPlayer = ExoPlayer.Builder(this).build()
             player = exoPlayer
-            binding.playerView.player = exoPlayer
+            playerView?.player = exoPlayer
 
             val mediaItem = MediaItem.fromUri(Uri.parse(mediaUrl))
             exoPlayer.setMediaItem(mediaItem)
@@ -56,7 +55,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun tryCastMediaIfConnected() {
         try {
-            val castSession: CastSession? = CastContext.getSharedInstance(this).sessionManager.currentCastSession
+            val castSession = CastContext.getSharedInstance(this).sessionManager.currentCastSession
             val remoteMediaClient = castSession?.remoteMediaClient ?: return
 
             val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
