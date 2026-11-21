@@ -37,7 +37,7 @@ class PlayerActivity : AppCompatActivity() {
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast Media"
     private var isCastingToTv: Boolean = false
-    private var resizeModeIndex: Int = 1 // 1 = ZOOM, 0 = FIT
+    private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = ZOOM
     private val dlnaController = DlnaController()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -232,14 +232,14 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun toggleResizeMode() {
         val pv = playerView ?: return
-        if (resizeModeIndex == 1) {
-            resizeModeIndex = 0
-            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-            Toast.makeText(this, "Fit Mode (Bina crop)", Toast.LENGTH_SHORT).show()
-        } else {
+        if (resizeModeIndex == 0) {
             resizeModeIndex = 1
             pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
             Toast.makeText(this, "Zoom Mode (Full screen)", Toast.LENGTH_SHORT).show()
+        } else {
+            resizeModeIndex = 0
+            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            Toast.makeText(this, "Fit Mode (Bina crop)", Toast.LENGTH_SHORT).show()
         }
         pv.requestLayout()
     }
