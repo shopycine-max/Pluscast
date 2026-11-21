@@ -30,10 +30,12 @@ jobs:
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
           fi
-
-      - name: Build Debug APK
+       - name: Build Debug APK
         run: |
           set -o pipefail
+          echo "=== ALL FILES UNDER app/src/main/res ==="
+          find app/src/main/res -maxdepth 4 -ls || true
+
           if [ -f "./gradlew" ]; then
             GRADLE_CMD="./gradlew"
           else
@@ -41,12 +43,13 @@ jobs:
           fi
 
           $GRADLE_CMD :app:assembleDebug --console=plain > build.log 2>&1 || {
-            echo "=== FIRST 60 LINES OF OUTPUT ==="
-            head -n 60 build.log
-            echo "=== KOTLIN / XML ERRORS ==="
-            grep -nE "^e:|error:|Unresolved|expecting|mismatch|cannot find symbol" build.log | head -n 40
+            echo "=== RESOURCE / GRADLE ERRORS ==="
+            grep -nE "ERROR:|Error:|error:|AAPT:|linking failed|Execution failed|Caused by:|Unresolved|expecting|cannot find symbol" build.log | head -n 50
+            echo "=== LAST 35 LINES ==="
+            tail -n 35 build.log
             exit 1
           }
+
 
       - name: Upload Debug APK Artifact
         if: success()
