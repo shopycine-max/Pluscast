@@ -30,6 +30,7 @@ class PlayerActivity : AppCompatActivity() {
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast Media"
     private var isCastingToTv: Boolean = false
+    private var resizeModeIndex: Int = 1 // 1 = ZOOM, 0 = FIT
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,6 +48,7 @@ class PlayerActivity : AppCompatActivity() {
 
         applyImmersiveSystemBars(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
         addRotateButton()
+        addZoomToggleButton()
         tryCastMediaIfConnected()
     }
 
@@ -92,6 +94,49 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun addZoomToggleButton() {
+        try {
+            val rootView = findViewById<ViewGroup>(android.R.id.content)
+            val sizePx = (48 * resources.displayMetrics.density).toInt()
+            val marginPx = (16 * resources.displayMetrics.density).toInt()
+            val gapPx = (10 * resources.displayMetrics.density).toInt()
+
+            val zoomButton = ImageButton(this).apply {
+                setImageResource(android.R.drawable.ic_menu_crop)
+                setColorFilter(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#99000000"))
+                contentDescription = "Toggle Zoom"
+                elevation = 12f
+                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    topMargin = marginPx + sizePx + gapPx
+                    rightMargin = marginPx
+                }
+                setOnClickListener {
+                    toggleResizeMode()
+                }
+            }
+            rootView.addView(zoomButton)
+            zoomButton.bringToFront()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun toggleResizeMode() {
+        val pv = playerView ?: return
+        if (resizeModeIndex == 1) {
+            resizeModeIndex = 0
+            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            Toast.makeText(this, "Fit Mode (Bina crop)", Toast.LENGTH_SHORT).show()
+        } else {
+            resizeModeIndex = 1
+            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            Toast.makeText(this, "Zoom Mode (Full screen)", Toast.LENGTH_SHORT).show()
+        }
+        pv.requestLayout()
+    }
+
     private fun toggleScreenOrientation() {
         val currentOrientation = resources.configuration.orientation
         requestedOrientation = if (currentOrientation == Configuration.ORIENTATION_LANDSCAPE) {
@@ -104,7 +149,11 @@ class PlayerActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         applyImmersiveSystemBars(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
-        playerView?.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        playerView?.resizeMode = if (resizeModeIndex == 1) {
+            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        } else {
+            AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
         playerView?.requestLayout()
     }
 
@@ -120,7 +169,11 @@ class PlayerActivity : AppCompatActivity() {
             val exoPlayer = ExoPlayer.Builder(this).build()
             player = exoPlayer
             playerView?.player = exoPlayer
-            playerView?.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            playerView?.resizeMode = if (resizeModeIndex == 1) {
+                AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            } else {
+                AspectRatioFrameLayout.RESIZE_MODE_FIT
+            }
 
             val mediaItem = MediaItem.fromUri(Uri.parse(mediaUrl))
             exoPlayer.setMediaItem(mediaItem)
