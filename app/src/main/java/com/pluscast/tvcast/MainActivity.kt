@@ -1,13 +1,22 @@
 package com.pluscast.tvcast
 
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.LayoutInflater
 import android.view.Menu
-import android.widget.ArrayAdapter
+import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.ListView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
@@ -22,6 +31,7 @@ import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -31,13 +41,17 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_INDIA_M3U_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
     }
 
-    private val ioExecutor = Executors.newSingleThreadExecutor()
+    private val ioExecutor = Executors.newFixedThreadPool(4)
+    private val logoCache = ConcurrentHashMap<String, Bitmap>()
+
     private var localServer: LocalMediaServer? = null
     private var channels: List<IptvChannel> = emptyList()
-    private var channelAdapter: ArrayAdapter<String>? = null
+    private var visibleChannels: List<IptvChannel> = emptyList()
+    private var channelAdapter: ChannelListAdapter? = null
 
     private var etStreamUrl: EditText? = null
     private var etM3uUrl: EditText? = null
+    private var etSearchChannel: EditText? = null
     private var lvIptvChannels: ListView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -82,10 +96,19 @@ class MainActivity : AppCompatActivity() {
     private fun initViewsAndListeners() {
         etStreamUrl = findViewById(R.id.etStreamUrl)
         etM3uUrl = findViewById(R.id.etM3uUrl)
+        etSearchChannel = findViewById(R.id.etSearchChannel)
         lvIptvChannels = findViewById(R.id.lvIptvChannels)
 
-        channelAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf())
+        channelAdapter = ChannelListAdapter()
         lvIptvChannels?.adapter = channelAdapter
+
+        etSearchChannel?.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                applyChannelFilter(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
 
         // 1. Local Media Picker
         findViewById<Button?>(R.id.cardLocalMedia)?.setOnClickListener {
@@ -122,7 +145,7 @@ class MainActivity : AppCompatActivity() {
 
         // 4. Channel Tap -> Open Player
         lvIptvChannels?.setOnItemClickListener { _, _, position, _ ->
-            val selected = channels.getOrNull(position) ?: return@setOnItemClickListener
+            val selected = visibleChannels.getOrNull(position) ?: return@setOnItemClickListener
             openPlayer(selected.url, selected.name)
         }
 
@@ -140,6 +163,31 @@ class MainActivity : AppCompatActivity() {
     private fun autoLoadIndiaIptv() {
         etM3uUrl?.setText(DEFAULT_INDIA_M3U_URL)
         loadM3uPlaylist(DEFAULT_INDIA_M3U_URL)
+    }
+
+    private fun applyChannelFilter(query: String) {
+        val q = query.trim().lowercase()
+        val matched = if (q.isEmpty()) {
+            channels
+        } else {
+            channels.filter { channel ->
+                val cat = channel.group?.takeIf { it.isNotBlank() } ?: "General"
+                channel.name.lowercase().contains(q) || cat.lowercase().contains(q)
+            }
+        }
+
+        // Category-wise grouping: pehle category ke naam se group karke sort karein
+        val grouped = matched.groupBy { channel ->
+            channel.group?.trim()?.takeIf { it.isNotEmpty() } ?: "General"
+        }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
+
+        val orderedList = mutableListOf<IptvChannel>()
+        for ((_, listInCategory) in grouped) {
+            orderedList.addAll(listInCategory.sortedBy { it.name.lowercase() })
+        }
+
+        visibleChannels = orderedList
+        channelAdapter?.notifyDataSetChanged()
     }
 
     private fun loadM3uPlaylist(m3uUrl: String) {
@@ -169,19 +217,10 @@ class MainActivity : AppCompatActivity() {
                 connection.disconnect()
 
                 val parsedChannels = M3uParser.parse(content)
-                val labels = parsedChannels.map { channel ->
-                    if (!channel.group.isNullOrBlank()) {
-                        "${channel.name} (${channel.group})"
-                    } else {
-                        channel.name
-                    }
-                }
 
                 runOnUiThread {
                     channels = parsedChannels
-                    channelAdapter?.clear()
-                    channelAdapter?.addAll(labels)
-                    channelAdapter?.notifyDataSetChanged()
+                    applyChannelFilter(etSearchChannel?.text?.toString().orEmpty())
                     Toast.makeText(
                         this,
                         "${parsedChannels.size} channels load hue",
@@ -194,6 +233,74 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "IPTV error: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
+        }
+    }
+
+    private fun loadChannelLogo(logoUrl: String?, imageView: ImageView) {
+        val defaultIcon = android.R.drawable.ic_menu_gallery
+        imageView.setImageResource(defaultIcon)
+
+        val cleanUrl = logoUrl?.trim().orEmpty()
+        if (cleanUrl.isEmpty() || (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://"))) {
+            return
+        }
+
+        logoCache[cleanUrl]?.let { cachedBitmap ->
+            imageView.setImageBitmap(cachedBitmap)
+            return
+        }
+
+        imageView.tag = cleanUrl
+        ioExecutor.execute {
+            try {
+                val conn = (URL(cleanUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 6000
+                    readTimeout = 6000
+                    requestMethod = "GET"
+                    setRequestProperty("User-Agent", "PlusCast/1.0")
+                }
+                if (conn.responseCode in 200..299) {
+                    conn.inputStream.use { stream ->
+                        val bitmap = BitmapFactory.decodeStream(stream)
+                        if (bitmap != null) {
+                            logoCache[cleanUrl] = bitmap
+                            runOnUiThread {
+                                if (imageView.tag == cleanUrl) {
+                                    imageView.setImageBitmap(bitmap)
+                                }
+                            }
+                        }
+                    }
+                }
+                conn.disconnect()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private inner class ChannelListAdapter : BaseAdapter() {
+        override fun getCount(): Int = visibleChannels.size
+
+        override fun getItem(position: Int): IptvChannel = visibleChannels[position]
+
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val rowView = convertView ?: LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_iptv_channel, parent, false)
+
+            val ivLogo = rowView.findViewById<ImageView>(R.id.ivChannelLogo)
+            val tvName = rowView.findViewById<TextView>(R.id.tvChannelName)
+            val tvCategory = rowView.findViewById<TextView>(R.id.tvChannelCategory)
+
+            val channel = getItem(position)
+            val categoryName = channel.group?.trim()?.takeIf { it.isNotEmpty() } ?: "General"
+
+            tvName.text = channel.name
+            tvCategory.text = "Category: $categoryName"
+            loadChannelLogo(channel.logo, ivLogo)
+
+            return rowView
         }
     }
 
