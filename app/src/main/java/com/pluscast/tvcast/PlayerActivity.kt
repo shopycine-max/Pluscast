@@ -11,6 +11,9 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -25,6 +28,7 @@ class PlayerActivity : AppCompatActivity() {
     private var playerView: PlayerView? = null
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast Media"
+    private var isCastingToTv: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,8 +44,24 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
 
+        applyImmersiveSystemBars(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
         addRotateButton()
         tryCastMediaIfConnected()
+    }
+
+    private fun applyImmersiveSystemBars(isLandscape: Boolean) {
+        try {
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            if (isLandscape) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun addRotateButton() {
@@ -50,8 +70,9 @@ class PlayerActivity : AppCompatActivity() {
             val rotateButton = ImageButton(this).apply {
                 setImageResource(android.R.drawable.ic_menu_rotate)
                 setColorFilter(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#80000000"))
+                setBackgroundColor(Color.parseColor("#99000000"))
                 contentDescription = "Rotate Screen"
+                elevation = 12f
                 val sizePx = (48 * resources.displayMetrics.density).toInt()
                 val marginPx = (16 * resources.displayMetrics.density).toInt()
                 layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
@@ -64,6 +85,7 @@ class PlayerActivity : AppCompatActivity() {
                 }
             }
             rootView.addView(rotateButton)
+            rotateButton.bringToFront()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -80,6 +102,7 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        applyImmersiveSystemBars(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
         playerView?.requestLayout()
     }
 
@@ -99,7 +122,7 @@ class PlayerActivity : AppCompatActivity() {
             val mediaItem = MediaItem.fromUri(Uri.parse(mediaUrl))
             exoPlayer.setMediaItem(mediaItem)
             exoPlayer.prepare()
-            exoPlayer.playWhenReady = true
+            exoPlayer.playWhenReady = !isCastingToTv
         } catch (e: Exception) {
             e.printStackTrace()
             Toast.makeText(this, "Player error: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -142,6 +165,8 @@ class PlayerActivity : AppCompatActivity() {
                 .build()
 
             remoteMediaClient.load(loadRequest)
+            isCastingToTv = true
+            player?.pause()
             Toast.makeText(this, "TV par cast ho raha hai...", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             e.printStackTrace()
