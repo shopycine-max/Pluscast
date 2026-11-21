@@ -17,7 +17,11 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.google.android.gms.cast.MediaInfo
@@ -269,7 +273,17 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun initializePlayer() {
         try {
-            val exoPlayer = ExoPlayer.Builder(this).build()
+            val dataSourceFactory = DefaultHttpDataSource.Factory()
+                .setUserAgent("PlusCast/1.0 (Android)")
+                .setAllowCrossProtocolRedirects(true)
+
+            val mediaSourceFactory = DefaultMediaSourceFactory(this)
+                .setDataSourceFactory(dataSourceFactory)
+
+            val exoPlayer = ExoPlayer.Builder(this)
+                .setMediaSourceFactory(mediaSourceFactory)
+                .build()
+
             player = exoPlayer
             playerView?.player = exoPlayer
             playerView?.resizeMode = if (resizeModeIndex == 1) {
@@ -277,6 +291,16 @@ class PlayerActivity : AppCompatActivity() {
             } else {
                 AspectRatioFrameLayout.RESIZE_MODE_FIT
             }
+
+            exoPlayer.addListener(object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    Toast.makeText(
+                        this@PlayerActivity,
+                        "Error (${error.errorCodeName}): ${error.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            })
 
             val mediaItem = MediaItem.fromUri(Uri.parse(mediaUrl))
             exoPlayer.setMediaItem(mediaItem)
