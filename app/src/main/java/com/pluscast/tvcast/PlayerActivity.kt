@@ -33,8 +33,14 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
 
-        initializePlayer()
         tryCastMediaIfConnected()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (player == null && mediaUrl.isNotEmpty()) {
+            initializePlayer()
+        }
     }
 
     private fun initializePlayer() {
@@ -62,14 +68,23 @@ class PlayerActivity : AppCompatActivity() {
                 putString(MediaMetadata.KEY_TITLE, mediaTitle)
             }
 
+            val isHls = mediaUrl.contains(".m3u8", ignoreCase = true)
             val mimeType = when {
-                mediaUrl.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
+                isHls -> "application/x-mpegURL"
                 mediaUrl.contains(".mp4", ignoreCase = true) -> "video/mp4"
+                mediaUrl.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
+                mediaUrl.contains(".mp3", ignoreCase = true) -> "audio/mpeg"
                 else -> "video/*"
             }
 
+            val streamType = if (isHls) {
+                MediaInfo.STREAM_TYPE_LIVE
+            } else {
+                MediaInfo.STREAM_TYPE_BUFFERED
+            }
+
             val mediaInfo = MediaInfo.Builder(mediaUrl)
-                .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+                .setStreamType(streamType)
                 .setContentType(mimeType)
                 .setMetadata(metadata)
                 .build()
@@ -88,6 +103,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun releasePlayer() {
         try {
+            playerView?.player = null
             player?.release()
             player = null
         } catch (e: Exception) {
