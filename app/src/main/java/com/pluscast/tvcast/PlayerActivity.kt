@@ -16,6 +16,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
@@ -103,6 +104,7 @@ class PlayerActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         applyImmersiveSystemBars(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        playerView?.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
         playerView?.requestLayout()
     }
 
@@ -118,6 +120,7 @@ class PlayerActivity : AppCompatActivity() {
             val exoPlayer = ExoPlayer.Builder(this).build()
             player = exoPlayer
             playerView?.player = exoPlayer
+            playerView?.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
 
             val mediaItem = MediaItem.fromUri(Uri.parse(mediaUrl))
             exoPlayer.setMediaItem(mediaItem)
