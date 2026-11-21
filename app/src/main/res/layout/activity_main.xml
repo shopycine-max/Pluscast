@@ -21,13 +21,27 @@
             android:orientation="vertical"
             android:padding="16dp">
 
-            <TextView
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:paddingBottom="12dp"
-                android:text="PlusCast"
-                android:textSize="22sp"
-                android:textStyle="bold" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingBottom="12dp">
+
+                <ImageView
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:contentDescription="PlusCast Logo"
+                    android:src="@drawable/ic_pluscast_logo" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="PlusCast"
+                    android:textSize="22sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
 
             <Button
                 android:id="@+id/cardLocalMedia"
@@ -67,6 +81,16 @@
                 android:layout_marginTop="6dp"
                 android:layout_marginBottom="8dp"
                 android:text="Load / Update IPTV Channels" />
+
+            <EditText
+                android:id="@+id/etSearchChannel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="6dp"
+                android:hint="Search channel name or group..."
+                android:inputType="text"
+                android:maxLines="1" />
 
             <ListView
                 android:id="@+id/lvIptvChannels"
