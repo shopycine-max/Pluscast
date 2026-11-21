@@ -1,231 +1,251 @@
 package com.pluscast.tvcast
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-import java.net.DatagramPacket
-import java.net.HttpURLConnection
-import java.net.InetAddress
-import java.net.MulticastSocket
-import java.net.SocketTimeoutException
-import java.net.URL
-import java.util.Locale
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.graphics.Color
+import android.net.Uri
+import android.os.Bundle
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import com.google.android.gms.cast.MediaInfo
+import com.google.android.gms.cast.MediaLoadRequestData
+import com.google.android.gms.cast.MediaMetadata
+import com.google.android.gms.cast.framework.CastContext
 
-data class DlnaDevice(
-    val friendlyName: String,
-    val controlUrl: String
-)
+class PlayerActivity : AppCompatActivity() {
 
-class DlnaController {
+    private var player: ExoPlayer? = null
+    private var playerView: PlayerView? = null
+    private var mediaUrl: String = ""
+    private var mediaTitle: String = "PlusCast Media"
+    private var isCastingToTv: Boolean = false
+    private var resizeModeIndex: Int = 1 // 1 = ZOOM, 0 = FIT
 
-    suspend fun discoverRenderers(timeoutMs: Int = 3000): List<DlnaDevice> =
-        withContext(Dispatchers.IO) {
-            val foundByControlUrl = linkedMapOf<String, DlnaDevice>()
-            val locations = linkedSetOf<String>()
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_player)
 
-            val ssdpQuery = buildString {
-                append("M-SEARCH * HTTP/1.1\r\n")
-                append("HOST: 239.255.255.250:1900\r\n")
-                append("MAN: \"ssdp:discover\"\r\n")
-                append("MX: 2\r\n")
-                append("ST: urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n")
-            }.toByteArray(Charsets.UTF_8)
+        playerView = findViewById(R.id.playerView)
+        mediaUrl = intent.getStringExtra("MEDIA_URL").orEmpty()
+        mediaTitle = intent.getStringExtra("MEDIA_TITLE") ?: "PlusCast Media"
 
-            var socket: MulticastSocket? = null
-            try {
-                socket = MulticastSocket()
-                socket.soTimeout = 700
-                val group = InetAddress.getByName("239.255.255.250")
-                val sendPacket = DatagramPacket(ssdpQuery, ssdpQuery.size, group, 1900)
-                socket.send(sendPacket)
-
-                val endTime = System.currentTimeMillis() + timeoutMs
-                val buf = ByteArray(2048)
-
-                while (System.currentTimeMillis() < endTime) {
-                    try {
-                        val recvPacket = DatagramPacket(buf, buf.size)
-                        socket.receive(recvPacket)
-                        val response = String(recvPacket.data, 0, recvPacket.length, Charsets.UTF_8)
-                        val location = extractHeader(response, "LOCATION")
-                        if (!location.isNullOrBlank()) {
-                            locations.add(location.trim())
-                        }
-                    } catch (_: SocketTimeoutException) {
-                        // Continue until timeoutMs expires
-                    } catch (_: Exception) {
-                        break
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            } finally {
-                try {
-                    socket?.close()
-                } catch (_: Exception) {
-                }
-            }
-
-            for (loc in locations) {
-                val device = parseDeviceDescription(loc)
-                if (device != null) {
-                    foundByControlUrl[device.controlUrl] = device
-                }
-            }
-
-            foundByControlUrl.values.toList()
+        if (mediaUrl.isEmpty()) {
+            Toast.makeText(this, "Media URL nahi mila", Toast.LENGTH_SHORT).show()
+            finish()
+            return
         }
 
-    suspend fun playMediaOnDevice(
-        device: DlnaDevice,
-        mediaUrl: String,
-        title: String = "PlusCast Media",
-        mimeType: String = "video/mp4"
-    ): Boolean = withContext(Dispatchers.IO) {
-        val escapedUrl = escapeXml(mediaUrl)
-        val escapedTitle = escapeXml(title)
-        val protocolInfo = "http-get:*:$mimeType:*"
-
-        val didlMetadata = escapeXml(
-            """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
-        )
-
-        val setUriSoap = """
-            <?xml version="1.0" encoding="utf-8"?>
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-                  <InstanceID>0</InstanceID>
-                  <CurrentURI>$escapedUrl</CurrentURI>
-                  <CurrentURIMetaData>$didlMetadata</CurrentURIMetaData>
-                </u:SetAVTransportURI>
-              </s:Body>
-            </s:Envelope>
-        """.trimIndent()
-
-        val uriSetOk = sendSoapAction(
-            controlUrl = device.controlUrl,
-            soapAction = "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"",
-            body = setUriSoap
-        )
-        if (!uriSetOk) return@withContext false
-
-        val playSoap = """
-            <?xml version="1.0" encoding="utf-8"?>
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-                  <InstanceID>0</InstanceID>
-                  <Speed>1</Speed>
-                </u:Play>
-              </s:Body>
-            </s:Envelope>
-        """.trimIndent()
-
-        sendSoapAction(
-            controlUrl = device.controlUrl,
-            soapAction = "\"urn:schemas-upnp-org:service:AVTransport:1#Play\"",
-            body = playSoap
-        )
+        applyImmersiveSystemBars(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        addRotateButton()
+        addZoomToggleButton()
+        tryCastMediaIfConnected()
     }
 
-    private fun parseDeviceDescription(locationUrl: String): DlnaDevice? {
-        var conn: HttpURLConnection? = null
-        return try {
-            val url = URL(locationUrl)
-            conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 2000
-                readTimeout = 2000
-                requestMethod = "GET"
+    private fun applyImmersiveSystemBars(isLandscape: Boolean) {
+        try {
+            val controller = WindowCompat.getInsetsController(window, window.decorView)
+            if (isLandscape) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
             }
-            if (conn.responseCode !in 200..299) return null
-
-            val xml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
-            val friendlyName = extractTagValue(xml, "friendlyName")
-                ?.trim()
-                ?.takeIf { it.isNotEmpty() }
-                ?: "DLNA Renderer"
-
-            val rawControlUrl = extractAvTransportControlUrl(xml)?.trim()
-            if (rawControlUrl.isNullOrEmpty()) return null
-
-            val resolvedControlUrl = URL(url, rawControlUrl).toString()
-            DlnaDevice(
-                friendlyName = friendlyName,
-                controlUrl = resolvedControlUrl
-            )
-        } catch (_: Exception) {
-            null
-        } finally {
-            conn?.disconnect()
-        }
-    }
-
-    private fun extractAvTransportControlUrl(xml: String): String? {
-        val serviceRegex = Regex("<service>([\\s\\S]*?)</service>", RegexOption.IGNORE_CASE)
-        for (match in serviceRegex.findAll(xml)) {
-            val block = match.groupValues[1]
-            val serviceType = extractTagValue(block, "serviceType") ?: ""
-            if (serviceType.contains("AVTransport", ignoreCase = true)) {
-                val ctrl = extractTagValue(block, "controlURL")
-                if (!ctrl.isNullOrBlank()) return ctrl
-            }
-        }
-        return null
-    }
-
-    private fun sendSoapAction(controlUrl: String, soapAction: String, body: String): Boolean {
-        var conn: HttpURLConnection? = null
-        return try {
-            val url = URL(controlUrl)
-            conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3000
-                readTimeout = 4000
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
-                setRequestProperty("SOAPAction", soapAction)
-            }
-            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
-                writer.write(body)
-                writer.flush()
-            }
-            conn.responseCode in 200..299
         } catch (e: Exception) {
             e.printStackTrace()
-            false
-        } finally {
-            conn?.disconnect()
         }
     }
 
-    private fun extractHeader(response: String, headerName: String): String? {
-        val target = headerName.lowercase(Locale.US)
-        for (line in response.split("\r\n", "\n")) {
-            val idx = line.indexOf(':')
-            if (idx > 0) {
-                val key = line.substring(0, idx).trim().lowercase(Locale.US)
-                if (key == target) {
-                    return line.substring(idx + 1).trim()
+    private fun addRotateButton() {
+        try {
+            val rootView = findViewById<ViewGroup>(android.R.id.content)
+            val rotateButton = ImageButton(this).apply {
+                setImageResource(android.R.drawable.ic_menu_rotate)
+                setColorFilter(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#99000000"))
+                contentDescription = "Rotate Screen"
+                elevation = 12f
+                val sizePx = (48 * resources.displayMetrics.density).toInt()
+                val marginPx = (16 * resources.displayMetrics.density).toInt()
+                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    topMargin = marginPx
+                    rightMargin = marginPx
+                }
+                setOnClickListener {
+                    toggleScreenOrientation()
                 }
             }
+            rootView.addView(rotateButton)
+            rotateButton.bringToFront()
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
-        return null
     }
 
-    private fun extractTagValue(xml: String, tagName: String): String? {
-        val regex = Regex("<(?:[a-zA-Z0-9_-]+:)?$tagName\\b[^>]*>([\\s\\S]*?)</(?:[a-zA-Z0-9_-]+:)?$tagName>", RegexOption.IGNORE_CASE)
-        return regex.find(xml)?.groupValues?.getOrNull(1)
+    private fun addZoomToggleButton() {
+        try {
+            val rootView = findViewById<ViewGroup>(android.R.id.content)
+            val sizePx = (48 * resources.displayMetrics.density).toInt()
+            val marginPx = (16 * resources.displayMetrics.density).toInt()
+            val gapPx = (10 * resources.displayMetrics.density).toInt()
+
+            val zoomButton = ImageButton(this).apply {
+                setImageResource(android.R.drawable.ic_menu_crop)
+                setColorFilter(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#99000000"))
+                contentDescription = "Toggle Zoom"
+                elevation = 12f
+                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    topMargin = marginPx + sizePx + gapPx
+                    rightMargin = marginPx
+                }
+                setOnClickListener {
+                    toggleResizeMode()
+                }
+            }
+            rootView.addView(zoomButton)
+            zoomButton.bringToFront()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
-    private fun escapeXml(input: String): String {
-        return input
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace("\"", "&quot;")
-            .replace("'", "&apos;")
+    private fun toggleResizeMode() {
+        val pv = playerView ?: return
+        if (resizeModeIndex == 1) {
+            resizeModeIndex = 0
+            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            Toast.makeText(this, "Fit Mode (Bina crop)", Toast.LENGTH_SHORT).show()
+        } else {
+            resizeModeIndex = 1
+            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            Toast.makeText(this, "Zoom Mode (Full screen)", Toast.LENGTH_SHORT).show()
+        }
+        pv.requestLayout()
+    }
+
+    private fun toggleScreenOrientation() {
+        val currentOrientation = resources.configuration.orientation
+        requestedOrientation = if (currentOrientation == Configuration.ORIENTATION_LANDSCAPE) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyImmersiveSystemBars(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        playerView?.resizeMode = if (resizeModeIndex == 1) {
+            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        } else {
+            AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+        playerView?.requestLayout()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (player == null && mediaUrl.isNotEmpty()) {
+            initializePlayer()
+        }
+    }
+
+    private fun initializePlayer() {
+        try {
+            val exoPlayer = ExoPlayer.Builder(this).build()
+            player = exoPlayer
+            playerView?.player = exoPlayer
+            playerView?.resizeMode = if (resizeModeIndex == 1) {
+                AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            } else {
+                AspectRatioFrameLayout.RESIZE_MODE_FIT
+            }
+
+            val mediaItem = MediaItem.fromUri(Uri.parse(mediaUrl))
+            exoPlayer.setMediaItem(mediaItem)
+            exoPlayer.prepare()
+            exoPlayer.playWhenReady = !isCastingToTv
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Toast.makeText(this, "Player error: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun tryCastMediaIfConnected() {
+        try {
+            val castSession = CastContext.getSharedInstance(this).sessionManager.currentCastSession
+            val remoteMediaClient = castSession?.remoteMediaClient ?: return
+
+            val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+                putString(MediaMetadata.KEY_TITLE, mediaTitle)
+            }
+
+            val isHls = mediaUrl.contains(".m3u8", ignoreCase = true)
+            val mimeType = when {
+                isHls -> "application/x-mpegURL"
+                mediaUrl.contains(".mp4", ignoreCase = true) -> "video/mp4"
+                mediaUrl.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
+                mediaUrl.contains(".mp3", ignoreCase = true) -> "audio/mpeg"
+                else -> "video/*"
+            }
+
+            val streamType = if (isHls) {
+                MediaInfo.STREAM_TYPE_LIVE
+            } else {
+                MediaInfo.STREAM_TYPE_BUFFERED
+            }
+
+            val mediaInfo = MediaInfo.Builder(mediaUrl)
+                .setStreamType(streamType)
+                .setContentType(mimeType)
+                .setMetadata(metadata)
+                .build()
+
+            val loadRequest = MediaLoadRequestData.Builder()
+                .setMediaInfo(mediaInfo)
+                .setAutoplay(true)
+                .build()
+
+            remoteMediaClient.load(loadRequest)
+            isCastingToTv = true
+            player?.pause()
+            Toast.makeText(this, "TV par cast ho raha hai...", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun releasePlayer() {
+        try {
+            playerView?.player = null
+            player?.release()
+            player = null
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        releasePlayer()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        releasePlayer()
     }
 }
