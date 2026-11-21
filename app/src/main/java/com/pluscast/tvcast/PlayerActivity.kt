@@ -10,10 +10,12 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -22,6 +24,7 @@ import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
 import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.framework.CastContext
+import kotlinx.coroutines.launch
 
 class PlayerActivity : AppCompatActivity() {
 
@@ -31,6 +34,7 @@ class PlayerActivity : AppCompatActivity() {
     private var mediaTitle: String = "PlusCast Media"
     private var isCastingToTv: Boolean = false
     private var resizeModeIndex: Int = 1 // 1 = ZOOM, 0 = FIT
+    private val dlnaController = DlnaController()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,6 +53,7 @@ class PlayerActivity : AppCompatActivity() {
         applyImmersiveSystemBars(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
         addRotateButton()
         addZoomToggleButton()
+        addDlnaButton()
         tryCastMediaIfConnected()
     }
 
@@ -120,6 +125,104 @@ class PlayerActivity : AppCompatActivity() {
             zoomButton.bringToFront()
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    private fun addDlnaButton() {
+        try {
+            val rootView = findViewById<ViewGroup>(android.R.id.content)
+            val sizePx = (48 * resources.displayMetrics.density).toInt()
+            val marginPx = (16 * resources.displayMetrics.density).toInt()
+            val gapPx = (10 * resources.displayMetrics.density).toInt()
+
+            val dlnaButton = ImageButton(this).apply {
+                setImageResource(android.R.drawable.stat_sys_data_bluetooth)
+                setColorFilter(Color.parseColor("#00E5FF"))
+                setBackgroundColor(Color.parseColor("#99000000"))
+                contentDescription = "Cast to DLNA"
+                elevation = 12f
+                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    topMargin = marginPx + (sizePx + gapPx) * 2
+                    rightMargin = marginPx
+                }
+                setOnClickListener {
+                    discoverAndShowDlnaDevices()
+                }
+            }
+            rootView.addView(dlnaButton)
+            dlnaButton.bringToFront()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun discoverAndShowDlnaDevices() {
+        Toast.makeText(this, "DLNA devices khoj raha hai...", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            val devices = dlnaController.discoverRenderers()
+            if (isFinishing || isDestroyed) return@launch
+
+            if (devices.isEmpty()) {
+                Toast.makeText(
+                    this@PlayerActivity,
+                    "Koi DLNA device nahi mila. Same Wi-Fi aur DLNA mode check karein.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            val names = devices.map { it.friendlyName }.toTypedArray()
+            AlertDialog.Builder(this@PlayerActivity)
+                .setTitle("DLNA Device Chunein")
+                .setItems(names) { _, which ->
+                    val selectedDevice = devices[which]
+                    startDlnaPlayback(selectedDevice)
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun startDlnaPlayback(device: DlnaDevice) {
+        val mimeType = detectMimeType(mediaUrl)
+        Toast.makeText(this, "${device.friendlyName} par bhej raha hai...", Toast.LENGTH_SHORT).show()
+
+        lifecycleScope.launch {
+            val ok = dlnaController.playMediaOnDevice(
+                device = device,
+                mediaUrl = mediaUrl,
+                title = mediaTitle,
+                mimeType = mimeType
+            )
+            if (isFinishing || isDestroyed) return@launch
+
+            if (ok) {
+                isCastingToTv = true
+                player?.pause()
+                Toast.makeText(
+                    this@PlayerActivity,
+                    "${device.friendlyName} par play ho raha hai",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else {
+                Toast.makeText(
+                    this@PlayerActivity,
+                    "DLNA playback start nahi ho saka",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private fun detectMimeType(url: String): String {
+        return when {
+            url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
+            url.contains(".mp4", ignoreCase = true) -> "video/mp4"
+            url.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
+            url.contains(".webm", ignoreCase = true) -> "video/webm"
+            url.contains(".mp3", ignoreCase = true) -> "audio/mpeg"
+            else -> "video/mp4"
         }
     }
 
