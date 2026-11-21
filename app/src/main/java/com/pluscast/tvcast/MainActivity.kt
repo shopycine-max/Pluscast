@@ -96,19 +96,20 @@ class MainActivity : AppCompatActivity() {
     private fun initViewsAndListeners() {
         etStreamUrl = findViewById(R.id.etStreamUrl)
         etM3uUrl = findViewById(R.id.etM3uUrl)
-        etSearchChannel = findViewById(R.id.etSearchChannel)
         lvIptvChannels = findViewById(R.id.lvIptvChannels)
 
-        channelAdapter = ChannelListAdapter()
-        lvIptvChannels?.adapter = channelAdapter
-
-        etSearchChannel?.addTextChangedListener(object : TextWatcher {
+        val searchInput = findViewById<EditText?>(R.id.etSearchChannel)
+        etSearchChannel = searchInput
+        searchInput?.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 applyChannelFilter(s?.toString().orEmpty())
             }
             override fun afterTextChanged(s: Editable?) {}
         })
+
+        channelAdapter = ChannelListAdapter()
+        lvIptvChannels?.adapter = channelAdapter
 
         // 1. Local Media Picker
         findViewById<Button?>(R.id.cardLocalMedia)?.setOnClickListener {
