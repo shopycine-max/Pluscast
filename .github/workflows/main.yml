@@ -37,6 +37,14 @@ jobs:
           echo "=== ALL FILES UNDER app/src/main/res ==="
           find app/src/main/res -maxdepth 4 -ls || true
 
+          for f in app/src/main/res/layout/*; do
+            clean_name=$(basename "$f" | tr -cd 'a-z0-9_.')
+            clean_dir=$(dirname "$f")
+            if [ "$clean_dir/$clean_name" != "$f" ] && [ -n "$clean_name" ]; then
+              mv "$f" "$clean_dir/$clean_name"
+            fi
+          done
+
           if [ -f "./gradlew" ]; then
             GRADLE_CMD="./gradlew"
           else
