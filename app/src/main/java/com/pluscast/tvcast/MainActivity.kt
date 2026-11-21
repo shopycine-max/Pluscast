@@ -13,7 +13,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
 import com.google.android.gms.cast.framework.CastButtonFactory
 import com.google.android.gms.cast.framework.CastContext
-import com.google.android.material.card.MaterialCardView
 import com.pluscast.tvcast.iptv.IptvChannel
 import com.pluscast.tvcast.iptv.M3uParser
 import com.pluscast.tvcast.server.LocalMediaServer
@@ -89,7 +88,7 @@ class MainActivity : AppCompatActivity() {
         lvIptvChannels?.adapter = channelAdapter
 
         // 1. Local Media Picker
-        findViewById<MaterialCardView?>(R.id.cardLocalMedia)?.setOnClickListener {
+        findViewById<Button?>(R.id.cardLocalMedia)?.setOnClickListener {
             try {
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
@@ -128,7 +127,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 5. YouTube Player
-        findViewById<MaterialCardView?>(R.id.cardYoutube)?.setOnClickListener {
+        findViewById<Button?>(R.id.cardYoutube)?.setOnClickListener {
             try {
                 startActivity(Intent(this, YouTubeActivity::class.java))
             } catch (e: Exception) {
