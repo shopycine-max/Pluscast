@@ -31,7 +31,7 @@ jobs:
             chmod +x ./gradlew
           fi
 
-      - name: Build Debug APK
+            - name: Build Debug APK
         run: |
           set -o pipefail
           if [ -f "./gradlew" ]; then
@@ -40,11 +40,14 @@ jobs:
             GRADLE_CMD="gradle"
           fi
 
-          $GRADLE_CMD :app:assembleDebug --stacktrace | tee build.log || {
-            echo "=== MAIN BUILD ERRORS ==="
-            grep -E "e:|FAILURE:|Caused by:|Execution failed|A problem occurred|error:" build.log | tail -n 40
+          $GRADLE_CMD :app:assembleDebug --console=plain > build.log 2>&1 || {
+            echo "=== FIRST 60 LINES OF OUTPUT ==="
+            head -n 60 build.log
+            echo "=== KOTLIN / XML ERRORS ==="
+            grep -nE "^e:|error:|Unresolved|expecting|mismatch|cannot find symbol" build.log | head -n 40
             exit 1
           }
+
 
       - name: Upload Debug APK Artifact
         if: success()
