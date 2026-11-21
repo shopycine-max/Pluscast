@@ -59,6 +59,17 @@ class PlayerActivity : AppCompatActivity() {
         addZoomToggleButton()
         addDlnaButton()
         tryCastMediaIfConnected()
+
+        val preselectedControlUrl = intent.getStringExtra("DLNA_CONTROL_URL").orEmpty()
+        if (preselectedControlUrl.isNotEmpty()) {
+            val preselectedName = intent.getStringExtra("DLNA_DEVICE_NAME") ?: "DLNA Renderer"
+            startDlnaPlayback(
+                DlnaDevice(
+                    friendlyName = preselectedName,
+                    controlUrl = preselectedControlUrl
+                )
+            )
+        }
     }
 
     private fun applyImmersiveSystemBars(isLandscape: Boolean) {
