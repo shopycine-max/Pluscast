@@ -30,7 +30,8 @@ jobs:
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
           fi
-       - name: Build Debug APK
+
+      - name: Build Debug APK
         run: |
           set -o pipefail
           echo "=== ALL FILES UNDER app/src/main/res ==="
@@ -49,7 +50,6 @@ jobs:
             tail -n 35 build.log
             exit 1
           }
-
 
       - name: Upload Debug APK Artifact
         if: success()
