@@ -1,9 +1,8 @@
 package com.pluscast.tvcast
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.os.Bundle
-import android.view.View
-import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -31,32 +30,27 @@ class YouTubeActivity : AppCompatActivity() {
         }
 
         try {
-            webView = findViewById<WebView>(R.id.webView)
-                ?: findViewById<WebView>(R.id.wvYoutube)
-                ?: findFirstWebView(window.decorView)
+            val wv = findViewById<WebView>(R.id.webView)
+            webView = wv
 
-            webView?.let { wv ->
-                wv.settings.javaScriptEnabled = true
-                wv.settings.domStorageEnabled = true
-                wv.settings.mediaPlaybackRequiresUserGesture = false
-                wv.settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                wv.webViewClient = WebViewClient()
-                wv.webChromeClient = WebChromeClient()
-                wv.loadUrl("https://m.youtube.com")
-            }
+            wv.settings.javaScriptEnabled = true
+            wv.settings.domStorageEnabled = true
+            wv.settings.mediaPlaybackRequiresUserGesture = false
+            wv.settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            wv.webViewClient = WebViewClient()
+            wv.webChromeClient = WebChromeClient()
+            wv.loadUrl("https://m.youtube.com")
 
-            val etUrl = findViewById<EditText?>(R.id.etYoutubeUrl)
-                ?: findViewById<EditText?>(R.id.etUrl)
-            val btnGo = findViewById<Button?>(R.id.btnLoadYoutube)
-                ?: findViewById<Button?>(R.id.btnGo)
+            val etUrl = findViewById<EditText>(R.id.etYoutubeUrl)
+            val btnGo = findViewById<Button>(R.id.btnLoadYoutube)
 
-            btnGo?.setOnClickListener {
-                val input = etUrl?.text?.toString()?.trim().orEmpty()
+            btnGo.setOnClickListener {
+                val input = etUrl.text.toString().trim()
                 if (input.isNotEmpty()) {
                     val targetUrl = if (input.startsWith("http://") || input.startsWith("https://")) {
                         input
                     } else {
-                        "https://m.youtube.com/results?search_query=${android.net.Uri.encode(input)}"
+                        "https://m.youtube.com/results?search_query=${Uri.encode(input)}"
                     }
                     webView?.loadUrl(targetUrl)
                 } else {
@@ -67,17 +61,6 @@ class YouTubeActivity : AppCompatActivity() {
             e.printStackTrace()
             Toast.makeText(this, "YouTube player error: ${e.message}", Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun findFirstWebView(root: View): WebView? {
-        if (root is WebView) return root
-        if (root is ViewGroup) {
-            for (i in 0 until root.childCount) {
-                val found = findFirstWebView(root.getChildAt(i))
-                if (found != null) return found
-            }
-        }
-        return null
     }
 
     @Deprecated("Deprecated in Java")
