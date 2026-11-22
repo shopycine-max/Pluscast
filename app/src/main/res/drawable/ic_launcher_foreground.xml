@@ -5,40 +5,48 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Safe zone scaling: 108dp canvas mein ~72dp area ke andar rakhne ke liye -->
-    <group
-        android:pivotX="54"
-        android:pivotY="54"
-        android:scaleX="0.68"
-        android:scaleY="0.68">
+    <!-- Outer broadcast bezel -->
+    <path
+        android:fillColor="#0B1322"
+        android:pathData="M24,26 L84,26 A6,6 0 0,1 90,32 L90,72 A6,6 0 0,1 84,78 L24,78 A6,6 0 0,1 18,72 L18,32 A6,6 0 0,1 24,26 Z"
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="3.2" />
 
-        <!-- Upar aur neeche TV/display frame lines -->
-        <path
-            android:fillColor="#18E0FF"
-            android:pathData="M24,14h60v4h-60z" />
-        <path
-            android:fillColor="#18E0FF"
-            android:pathData="M24,90h60v4h-60z" />
-        <path
-            android:fillColor="#18E0FF"
-            android:pathData="M44,94h20v4h-20z" />
+    <!-- Clean live signal arc on top-left inside bezel -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M27,41 A12,12 0 0,1 39,53"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.4" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M27,34 A19,19 0 0,1 46,53"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.4" />
 
-        <!-- Cast / signal arcs (left) -->
-        <path
-            android:fillColor="#18E0FF"
-            android:pathData="M22,36a22,22 0 0,1 18,18h-4a18,18 0 0,0 -14,-14z" />
-        <path
-            android:fillColor="#18E0FF"
-            android:pathData="M22,46a12,12 0 0,1 8,8h-4a8,8 0 0,0 -4,-4z" />
+    <!-- Sharp broadcast play mark -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M48,40 L70,52 L48,64 Z" />
 
-        <!-- Center play triangle -->
-        <path
-            android:fillColor="#18E0FF"
-            android:pathData="M46,34l28,20l-28,20z" />
+    <!-- Gold live indicator dot -->
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M78,35 A3.5,3.5 0 1,1 77.99,35 Z" />
 
-        <!-- Top-right notification / live dot -->
-        <path
-            android:fillColor="#FFB319"
-            android:pathData="M80,32m-6,0a6,6 0 1,0 12,0a6,6 0 1,0 -12,0" />
-    </group>
+    <!-- Broadcast stand base -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M42,84 L66,84"
+        android:strokeColor="#00E5FF"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.0" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M54,78 L54,84"
+        android:strokeColor="#00E5FF"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.0" />
 </vector>
