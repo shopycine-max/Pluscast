@@ -228,7 +228,7 @@ class PlayerActivity : AppCompatActivity() {
         Toast.makeText(this, "${device.friendlyName} par bhej raha hai...", Toast.LENGTH_SHORT).show()
 
         lifecycleScope.launch {
-            val ok = dlnaController.playMediaOnDevice(
+            val result = dlnaController.playMediaOnDevice(
                 device = device,
                 mediaUrl = mediaUrl,
                 title = mediaTitle,
@@ -236,7 +236,7 @@ class PlayerActivity : AppCompatActivity() {
             )
             if (isFinishing || isDestroyed) return@launch
 
-            if (ok) {
+            if (result.success) {
                 isCastingToTv = true
                 player?.pause()
                 Toast.makeText(
@@ -247,8 +247,8 @@ class PlayerActivity : AppCompatActivity() {
             } else {
                 Toast.makeText(
                     this@PlayerActivity,
-                    "DLNA playback start nahi ho saka",
-                    Toast.LENGTH_SHORT
+                    "DLNA fail: ${result.message}",
+                    Toast.LENGTH_LONG
                 ).show()
             }
         }
