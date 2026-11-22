@@ -65,7 +65,7 @@ class MainActivity : AppCompatActivity() {
         private const val DAILY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
 
         // India IPTV M3U playlist link (UI mein kahin nahi dikhega)
-        private const val DEFAULT_PLAYLIST_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
+        private const val DEFAULT_PLAYLIST_URL = M3uPlaylistParser.DEFAULT_PLAYLIST_URL
 
         // Dark Broadcast / TV Palette
         private const val BG_PRIMARY = "#070B12"
@@ -139,7 +139,7 @@ class MainActivity : AppCompatActivity() {
         if (activeUrl.isNotEmpty() && !isLoadingPlaylist) {
             val dueDaily = isDailyRefreshDue()
             if (allChannels.isEmpty() || dueDaily) {
-                loadPlaylist(activeUrl, force = allChannels.isEmpty(), showToast = false)
+                loadPlaylist(activeUrl, force = allChannels.isEmpty() || dueDaily, showToast = false)
             }
         }
     }
@@ -167,7 +167,8 @@ class MainActivity : AppCompatActivity() {
         val lastMs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             .getLong(KEY_LAST_REFRESH_MS, 0L)
         if (lastMs <= 0L) return true
-        return (System.currentTimeMillis() - lastMs) >= DAILY_REFRESH_INTERVAL_MS
+        return (System.currentTimeMillis() - lastMs) >= DAILY_REFRESH_INTERVAL_MS ||
+            M3uPlaylistParser.isDailyRefreshDue(applicationContext)
     }
 
     private fun markPlaylistRefreshedNow() {
@@ -175,6 +176,7 @@ class MainActivity : AppCompatActivity() {
             .edit()
             .putLong(KEY_LAST_REFRESH_MS, System.currentTimeMillis())
             .apply()
+        M3uPlaylistParser.markRefreshedNow(applicationContext)
     }
 
     private fun applySystemBarInsets(root: View) {
@@ -568,7 +570,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
-            val fetched = M3uPlaylistParser.fetchChannels(url, applicationContext)
+            val fetched = M3uPlaylistParser.fetchChannels(
+                playlistUrl = url,
+                context = applicationContext,
+                forceRefresh = force
+            )
             if (isFinishing || isDestroyed) return@launch
 
             isLoadingPlaylist = false
@@ -695,15 +701,33 @@ class MainActivity : AppCompatActivity() {
             .putString(KEY_LAST_TITLE, channel.name)
             .apply()
         updateLastWatchedPill()
-        launchPlayer(channel.url, channel.name)
+        launchPlayer(
+            url = channel.url,
+            title = channel.name,
+            userAgent = channel.userAgent,
+            referrer = channel.referrer
+        )
     }
 
-    private fun launchPlayer(url: String, title: String) {
+    private fun launchPlayer(
+        url: String,
+        title: String,
+        userAgent: String = "",
+        referrer: String = ""
+    ) {
         val intent = Intent(this, PlayerActivity::class.java).apply {
             putExtra("MEDIA_URL", url)
             putExtra("MEDIA_TITLE", title)
             putExtra(PlayerActivity.EXTRA_MEDIA_URL, url)
             putExtra(PlayerActivity.EXTRA_MEDIA_TITLE, title)
+            if (userAgent.isNotBlank()) {
+                putExtra("MEDIA_USER_AGENT", userAgent)
+                putExtra(PlayerActivity.EXTRA_MEDIA_USER_AGENT, userAgent)
+            }
+            if (referrer.isNotBlank()) {
+                putExtra("MEDIA_REFERRER", referrer)
+                putExtra(PlayerActivity.EXTRA_MEDIA_REFERRER, referrer)
+            }
 
             val savedDevice = DlnaDeviceStore.getLastDevice(this@MainActivity)
             if (savedDevice != null) {
@@ -733,61 +757,80 @@ class MainActivity : AppCompatActivity() {
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
-        val fSize = size.toFloat()
-        val inset = fSize * 0.06f
-        val rect = RectF(inset, inset, fSize - inset, fSize - inset)
-        val corner = fSize * 0.28f
+        val f = size.toFloat()
+        val inset = f * 0.06f
+        val bgRect = RectF(inset, inset, f - inset, f - inset)
+        val corner = f * 0.24f
 
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             shader = LinearGradient(
-                0f, 0f, fSize, fSize,
+                0f, 0f, f, f,
                 intArrayOf(
-                    Color.parseColor("#13253E"),
-                    Color.parseColor("#0B1322")
+                    Color.parseColor("#101B2E"),
+                    Color.parseColor("#060A12")
                 ),
                 null,
                 Shader.TileMode.CLAMP
             )
         }
+        canvas.drawRoundRect(bgRect, corner, corner, bgPaint)
 
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = (fSize * 0.048f).coerceAtLeast(2f)
-            shader = LinearGradient(
-                0f, 0f, fSize, fSize,
-                intArrayOf(
-                    Color.parseColor(ACCENT_CYAN),
-                    Color.parseColor(ACCENT_SKY)
-                ),
-                null,
-                Shader.TileMode.CLAMP
-            )
-        }
-
-        canvas.drawRoundRect(rect, corner, corner, bgPaint)
-        canvas.drawRoundRect(rect, corner, corner, borderPaint)
-
-        val playPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor(ACCENT_CYAN)
+        // Broadcast TV bezel
+        val bezelRect = RectF(f * 0.17f, f * 0.24f, f * 0.83f, f * 0.72f)
+        val bezelFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
+            color = Color.parseColor("#0B1322")
         }
-        val cx = fSize * 0.46f
-        val cy = fSize * 0.54f
-        val r = fSize * 0.20f
+        val bezelStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = (f * 0.042f).coerceAtLeast(1.8f)
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            color = Color.parseColor(ACCENT_CYAN)
+        }
+        canvas.drawRoundRect(bezelRect, f * 0.07f, f * 0.07f, bezelFill)
+        canvas.drawRoundRect(bezelRect, f * 0.07f, f * 0.07f, bezelStroke)
+
+        // Clean live signal arcs on top-left inside bezel
+        val wavePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = (f * 0.032f).coerceAtLeast(1.3f)
+            strokeCap = Paint.Cap.ROUND
+            color = Color.parseColor(ACCENT_SKY)
+        }
+        canvas.drawArc(RectF(f * 0.25f, f * 0.38f, f * 0.36f, f * 0.49f), -75f, 75f, false, wavePaint)
+        canvas.drawArc(RectF(f * 0.25f, f * 0.31f, f * 0.43f, f * 0.49f), -75f, 75f, false, wavePaint)
+
+        // Sharp broadcast play mark
+        val playPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.parseColor(ACCENT_CYAN)
+        }
         val playPath = Path().apply {
-            moveTo(cx - r * 0.65f, cy - r)
-            lineTo(cx + r * 1.15f, cy)
-            lineTo(cx - r * 0.65f, cy + r)
+            moveTo(f * 0.44f, f * 0.37f)
+            lineTo(f * 0.65f, f * 0.48f)
+            lineTo(f * 0.44f, f * 0.59f)
             close()
         }
         canvas.drawPath(playPath, playPaint)
 
-        val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor(ACCENT_GOLD)
+        // Gold live indicator dot
+        val liveDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
+            color = Color.parseColor(ACCENT_GOLD)
         }
-        canvas.drawCircle(fSize * 0.74f, fSize * 0.28f, (fSize * 0.065f).coerceAtLeast(2f), dotPaint)
+        canvas.drawCircle(f * 0.72f, f * 0.32f, (f * 0.042f).coerceAtLeast(1.5f), liveDotPaint)
+
+        // Broadcast stand base
+        val standPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = (f * 0.040f).coerceAtLeast(1.6f)
+            strokeCap = Paint.Cap.ROUND
+            color = Color.parseColor(ACCENT_CYAN)
+        }
+        canvas.drawLine(f * 0.50f, f * 0.72f, f * 0.50f, f * 0.80f, standPaint)
+        canvas.drawLine(f * 0.39f, f * 0.80f, f * 0.61f, f * 0.80f, standPaint)
 
         return BitmapDrawable(resources, bitmap)
     }
