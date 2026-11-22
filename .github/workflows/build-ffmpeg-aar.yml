@@ -48,10 +48,10 @@ jobs:
           done
 
           cd "$GITHUB_WORKSPACE/media3"
-          ./gradlew :libraries:decoder_ffmpeg:bundleReleaseAar --no-daemon
+          ./gradlew :lib-decoder-ffmpeg:bundleReleaseAar --no-daemon
 
       - name: Upload AAR artifact
         uses: actions/upload-artifact@v4
         with:
           name: media3-1.4.1-ffmpeg-aar
-          path: media3/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
+          path: media3/**/outputs/aar/*.aar
