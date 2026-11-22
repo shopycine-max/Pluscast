@@ -2,6 +2,7 @@ package com.pluscast.tvcast
 
 import android.content.Context
 import android.net.wifi.WifiManager
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
@@ -24,9 +25,13 @@ data class DlnaDevice(
 
 class DlnaController(private val context: Context? = null) {
 
-    suspend fun discoverRenderers(timeoutMs: Int = 3500): List<DlnaDevice> =
+    companion object {
+        private const val TAG = "PlusCastDlna"
+    }
+
+    suspend fun discoverRenderers(timeoutMs: Int = 4000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
-            val foundByControlUrl = linkedMapOf<String, DlnaDevice>()
+            val foundByNameOrUrl = linkedMapOf<String, DlnaDevice>()
             val locations = linkedSetOf<String>()
 
             val appContext = context?.applicationContext
@@ -36,11 +41,14 @@ class DlnaController(private val context: Context? = null) {
                     setReferenceCounted(false)
                     acquire()
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w(TAG, "MulticastLock failed", e)
                 null
             }
 
             val searchTargets = listOf(
+                "ssdp:all",
+                "urn:schemas-upnp-org:device:MediaRenderer:1",
                 "urn:schemas-upnp-org:service:AVTransport:1",
                 "upnp:rootdevice"
             )
@@ -60,6 +68,11 @@ class DlnaController(private val context: Context? = null) {
                 }
 
                 val group = InetAddress.getByName("239.255.255.250")
+                try {
+                    socket.joinGroup(group)
+                } catch (_: Exception) {
+                }
+
                 for (st in searchTargets) {
                     val ssdpQuery = buildString {
                         append("M-SEARCH * HTTP/1.1\r\n")
@@ -74,7 +87,7 @@ class DlnaController(private val context: Context? = null) {
                 }
 
                 val endTime = System.currentTimeMillis() + timeoutMs
-                val buf = ByteArray(2048)
+                val buf = ByteArray(4096)
 
                 while (System.currentTimeMillis() < endTime) {
                     try {
@@ -87,12 +100,18 @@ class DlnaController(private val context: Context? = null) {
                         }
                     } catch (_: SocketTimeoutException) {
                         // Continue until timeoutMs expires
-                    } catch (_: Exception) {
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Receive loop error", e)
                         break
                     }
                 }
+
+                try {
+                    socket.leaveGroup(group)
+                } catch (_: Exception) {
+                }
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "SSDP discovery failed", e)
             } finally {
                 try {
                     socket?.close()
@@ -106,14 +125,17 @@ class DlnaController(private val context: Context? = null) {
                 }
             }
 
+            Log.d(TAG, "Found ${locations.size} SSDP locations")
+
             for (loc in locations) {
                 val device = parseDeviceDescription(loc)
                 if (device != null) {
-                    foundByControlUrl[device.controlUrl] = device
+                    val key = "${device.friendlyName}|${device.controlUrl}"
+                    foundByNameOrUrl[key] = device
                 }
             }
 
-            foundByControlUrl.values.toList()
+            foundByNameOrUrl.values.toList()
         }
 
     suspend fun playMediaOnDevice(
@@ -122,12 +144,13 @@ class DlnaController(private val context: Context? = null) {
         title: String = "PlusCast Media",
         mimeType: String = "video/mp4"
     ): Boolean = withContext(Dispatchers.IO) {
+        if (device.controlUrl.isBlank()) return@withContext false
+
         val escapedUrl = escapeXml(mediaUrl)
         val escapedTitle = escapeXml(title)
         val escapedMime = escapeXml(mimeType)
         val protocolInfo = "http-get:*:$escapedMime:*"
 
-        // Single XML escape for CurrentURIMetaData (avoid double-escaping inner entities)
         val rawDidl = """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
         val didlMetadata = escapeXml(rawDidl)
 
@@ -203,17 +226,24 @@ class DlnaController(private val context: Context? = null) {
             val friendlyName = extractTagValue(xml, "friendlyName")
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
-                ?: "DLNA Renderer"
+                ?: return null
+
+            Log.d(TAG, "Device XML parsed: friendlyName=$friendlyName, location=$locationUrl")
 
             val rawControlUrl = extractAvTransportControlUrl(xml)?.trim()
-            if (rawControlUrl.isNullOrEmpty()) return null
+            val resolvedControlUrl = if (!rawControlUrl.isNullOrEmpty()) {
+                URL(url, rawControlUrl).toString()
+            } else {
+                ""
+            }
 
-            val resolvedControlUrl = URL(url, rawControlUrl).toString()
+            // Include device even if AVTransport controlURL is missing so user can see what was discovered
             DlnaDevice(
-                friendlyName = friendlyName,
+                friendlyName = if (resolvedControlUrl.isEmpty()) "$friendlyName (No AVTransport)" else friendlyName,
                 controlUrl = resolvedControlUrl
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse location: $locationUrl", e)
             null
         } finally {
             conn?.disconnect()
@@ -249,9 +279,11 @@ class DlnaController(private val context: Context? = null) {
                 writer.write(body)
                 writer.flush()
             }
-            conn.responseCode in 200..299
+            val code = conn.responseCode
+            Log.d(TAG, "SOAP $soapAction -> HTTP $code")
+            code in 200..299
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "SOAP failed for $soapAction", e)
             false
         } finally {
             conn?.disconnect()
