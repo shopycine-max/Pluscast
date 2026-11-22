@@ -43,21 +43,36 @@ jobs:
           cd "$JNI_DIR"
           sed -i '/--disable-postproc/d' build_ffmpeg.sh
 
+          python3 - <<'EOF'
+          from pathlib import Path
+
+          log_c = Path("ffmpeg/libavutil/log.c")
+          text = log_c.read_text(encoding="utf-8")
+
+          guard = """
+          #ifdef __ANDROID__
+          #include <stdio.h>
+          static FILE *pluscast_stderr_fallback = NULL;
+          #undef stderr
+          #define stderr (pluscast_stderr_fallback ? pluscast_stderr_fallback : (pluscast_stderr_fallback = fopen("/dev/null", "w")))
+          #endif
+          """
+
+          if "pluscast_stderr_fallback" not in text:
+              marker = "#include \"log.h\""
+              if marker in text:
+                  text = text.replace(marker, marker + "\n" + guard, 1)
+              else:
+                  text = guard + "\n" + text
+              log_c.write_text(text, encoding="utf-8")
+          EOF
+
           for abi in arm64-v8a armeabi-v7a; do
             ANDROID_ABI="$abi" ./build_ffmpeg.sh "$MODULE_DIR" "$NDK_DIR" "linux-x86_64" "24"
           done
 
           cd "$GITHUB_WORKSPACE/media3"
-          set +e
-          ./gradlew :lib-decoder-ffmpeg:bundleReleaseAar --no-daemon > "$HOME/gradle.log" 2>&1
-          EXIT_CODE=$?
-          set -e
-
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "=== LINKER UNDEFINED SYMBOLS ==="
-            grep -B 15 "error: linker command failed" "$HOME/gradle.log" | tail -n 25
-            exit $EXIT_CODE
-          fi
+          ./gradlew :lib-decoder-ffmpeg:bundleReleaseAar --no-daemon
 
       - name: Upload AAR artifact
         uses: actions/upload-artifact@v4
