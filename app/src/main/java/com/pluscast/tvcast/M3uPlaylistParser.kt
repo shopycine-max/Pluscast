@@ -9,7 +9,6 @@ import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.Locale
 
 data class IptvChannel(
     val name: String,
@@ -96,7 +95,7 @@ object M3uPlaylistParser {
     }
 
     private fun parseReader(reader: BufferedReader): List<IptvChannel> {
-        val channels = ArrayList<IptvChannel>(1024)
+        val channels = ArrayList<IptvChannel>(2048)
         var pendingName: String? = null
         var pendingGroup: String = "All"
         var pendingLogo: String = ""
@@ -136,17 +135,15 @@ object M3uPlaylistParser {
                 line.startsWith("https://", ignoreCase = true)
             ) {
                 val finalName = pendingName?.takeIf { it.isNotBlank() } ?: "Channel $indexCounter"
-                val candidate = IptvChannel(
-                    name = finalName,
-                    url = line,
-                    group = pendingGroup,
-                    logoUrl = pendingLogo,
-                    language = pendingLang
+                channels.add(
+                    IptvChannel(
+                        name = finalName,
+                        url = line,
+                        group = pendingGroup,
+                        logoUrl = pendingLogo,
+                        language = pendingLang
+                    )
                 )
-
-                if (isAllowedChannel(candidate)) {
-                    channels.add(candidate)
-                }
 
                 indexCounter++
                 pendingName = null
@@ -156,32 +153,7 @@ object M3uPlaylistParser {
             }
         }
 
-        Log.d(TAG, "Filtered playlist -> ${channels.size} allowed channels")
+        Log.d(TAG, "Parsed playlist -> ${channels.size} total channels")
         return channels
     }
-
-    fun resolveCategory(channel: IptvChannel): String? {
-        val hay = buildString {
-            append(channel.name.lowercase(Locale.US))
-            append(' ')
-            append(channel.group.lowercase(Locale.US))
-            append(' ')
-            append(channel.language.lowercase(Locale.US))
-        }
-
-        val hasHindi = Regex("""\bhindi\b""").containsMatchIn(hay)
-        val hasBhojpuri = Regex("""\bbhojpuri\b""").containsMatchIn(hay)
-        val hasBengali = Regex("""\b(bengali|bangla)\b""").containsMatchIn(hay) ||
-            channel.name.any { it.code in 0x0980..0x09FF }
-        val hasNews = Regex("""\bnews\b""").containsMatchIn(hay)
-
-        return when {
-            hasBhojpuri -> "Bhojpuri"
-            hasHindi -> "Hindi"
-            hasBengali && hasNews -> "Bengali News"
-            else -> null
-        }
-    }
-
-    fun isAllowedChannel(channel: IptvChannel): Boolean = resolveCategory(channel) != null
 }
