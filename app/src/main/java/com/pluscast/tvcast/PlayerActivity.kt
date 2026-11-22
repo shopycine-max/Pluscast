@@ -107,9 +107,10 @@ class PlayerActivity : AppCompatActivity() {
         window.navigationBarColor = Color.parseColor(BG_PLAYER)
         WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
-        mediaUrl = intent.getStringExtra("MEDIA_URL")?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: intent.getStringExtra(EXTRA_MEDIA_URL)?.trim().orEmpty()
+        mediaUrl = (
+            intent.getStringExtra("MEDIA_URL")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: intent.getStringExtra(EXTRA_MEDIA_URL)?.trim().orEmpty()
+            ).takeIf(::isValidMediaUrl).orEmpty()
 
         mediaTitle = intent.getStringExtra("MEDIA_TITLE")?.trim()
             ?.takeIf { it.isNotEmpty() }
@@ -117,17 +118,19 @@ class PlayerActivity : AppCompatActivity() {
                 ?.takeIf { it.isNotEmpty() }
             ?: "PlusCast IPTV"
 
-        mediaUserAgent = intent.getStringExtra("MEDIA_USER_AGENT")?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: intent.getStringExtra(EXTRA_MEDIA_USER_AGENT)?.trim().orEmpty()
+        mediaUserAgent = sanitizeHeader(
+            intent.getStringExtra("MEDIA_USER_AGENT")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: intent.getStringExtra(EXTRA_MEDIA_USER_AGENT)?.trim().orEmpty()
+        )
 
-        mediaReferrer = intent.getStringExtra("MEDIA_REFERRER")?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?: intent.getStringExtra(EXTRA_MEDIA_REFERRER)?.trim().orEmpty()
+        mediaReferrer = sanitizeHeader(
+            intent.getStringExtra("MEDIA_REFERRER")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: intent.getStringExtra(EXTRA_MEDIA_REFERRER)?.trim().orEmpty()
+        )
 
         val savedName = intent.getStringExtra("DLNA_DEVICE_NAME")?.trim().orEmpty()
         val savedCtrl = intent.getStringExtra("DLNA_CONTROL_URL")?.trim().orEmpty()
-        if (savedName.isNotEmpty() && savedCtrl.isNotEmpty()) {
+        if (savedName.isNotEmpty() && isValidMediaUrl(savedCtrl)) {
             selectedDlnaDevice = DlnaDevice(
                 friendlyName = savedName,
                 controlUrl = savedCtrl
@@ -144,7 +147,7 @@ class PlayerActivity : AppCompatActivity() {
         syncLockState()
 
         if (mediaUrl.isEmpty()) {
-            Toast.makeText(this, "Stream URL nahi mila", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Valid stream URL nahi mila", Toast.LENGTH_LONG).show()
             finish()
             return
         }
@@ -176,6 +179,16 @@ class PlayerActivity : AppCompatActivity() {
         autoHideHandler.removeCallbacks(hideControlsRunnable)
         releasePlayer()
         super.onDestroy()
+    }
+
+    private fun isValidMediaUrl(url: String): Boolean {
+        if (url.isBlank() || url.any { it.isISOControl() || it.isWhitespace() }) return false
+        return url.startsWith("http://", ignoreCase = true) ||
+            url.startsWith("https://", ignoreCase = true)
+    }
+
+    private fun sanitizeHeader(value: String): String {
+        return value.filterNot { it == '\r' || it == '\n' || it.isISOControl() }.trim()
     }
 
     private fun isLandscape(orientation: Int): Boolean =
@@ -318,7 +331,6 @@ class PlayerActivity : AppCompatActivity() {
             )
         }
 
-        // useController = false so no full-width controller line overlays the video
         val pv = PlayerView(this).apply {
             useController = false
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -376,7 +388,6 @@ class PlayerActivity : AppCompatActivity() {
         progressBar = spinner
         root.addView(spinner)
 
-        // Compact floating controls only (no full-width bar/line across screen)
         val controlsCluster = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -612,6 +623,10 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
 
+        discoverAndPickCastDevice()
+    }
+
+    private fun discoverAndPickCastDevice() {
         Toast.makeText(this, "DLNA TV khoj raha hai...", Toast.LENGTH_SHORT).show()
         lifecycleScope.launch {
             val devices = dlnaController.discoverRenderers()
@@ -654,11 +669,19 @@ class PlayerActivity : AppCompatActivity() {
             )
             if (isFinishing || isDestroyed) return@launch
 
-            Toast.makeText(
-                this@PlayerActivity,
-                if (res.success) "${device.friendlyName} par chal raha hai" else res.message,
-                Toast.LENGTH_LONG
-            ).show()
+            if (res.success) {
+                Toast.makeText(
+                    this@PlayerActivity,
+                    "${device.friendlyName} par chal raha hai",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                Toast.makeText(
+                    this@PlayerActivity,
+                    res.message,
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
     }
 
