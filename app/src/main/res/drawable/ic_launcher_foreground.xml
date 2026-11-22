@@ -5,40 +5,48 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Broadcast frame container -->
+    <!-- Outer broadcast bezel -->
     <path
-        android:fillColor="#132238"
-        android:pathData="M28,31 L80,31 A7,7 0 0,1 87,38 L87,70 A7,7 0 0,1 80,77 L28,77 A7,7 0 0,1 21,70 L21,38 A7,7 0 0,1 28,31 Z" />
+        android:fillColor="#0B1322"
+        android:pathData="M24,26 L84,26 A6,6 0 0,1 90,32 L90,72 A6,6 0 0,1 84,78 L24,78 A6,6 0 0,1 18,72 L18,32 A6,6 0 0,1 24,26 Z"
+        android:strokeColor="#00E5FF"
+        android:strokeWidth="3.2" />
 
-    <!-- Crisp cyan-tinted broadcast frame -->
+    <!-- Clean live signal arc on top-left inside bezel -->
     <path
-        android:fillColor="#00000000"
-        android:pathData="M28,31 L80,31 A7,7 0 0,1 87,38 L87,70 A7,7 0 0,1 80,77 L28,77 A7,7 0 0,1 21,70 L21,38 A7,7 0 0,1 28,31 Z"
-        android:strokeWidth="2.6"
-        android:strokeColor="#00E5FF" />
+        android:fillColor="@android:color/transparent"
+        android:pathData="M27,41 A12,12 0 0,1 39,53"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.4" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M27,34 A19,19 0 0,1 46,53"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round"
+        android:strokeWidth="2.4" />
 
-    <!-- Play triangle -->
+    <!-- Sharp broadcast play mark -->
     <path
         android:fillColor="#00E5FF"
-        android:pathData="M44,42 L65,54 L44,66 Z" />
+        android:pathData="M48,40 L70,52 L48,64 Z" />
 
-    <!-- Gold live/cast indicator dot -->
+    <!-- Gold live indicator dot -->
     <path
         android:fillColor="#FBBF24"
-        android:pathData="M73,63 A3.5,3.5 0 1,1 72.99,63 Z" />
+        android:pathData="M78,35 A3.5,3.5 0 1,1 77.99,35 Z" />
 
-    <!-- Cast signal arcs -->
+    <!-- Broadcast stand base -->
     <path
-        android:fillColor="#00000000"
-        android:pathData="M68,36 A7,7 0 0,1 81,36"
-        android:strokeWidth="2.2"
-        android:strokeColor="#38BDF8"
-        android:strokeLineCap="round" />
-
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M71,40 A3.8,3.8 0 0,1 78,40"
-        android:strokeWidth="2.2"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M42,84 L66,84"
         android:strokeColor="#00E5FF"
-        android:strokeLineCap="round" />
+        android:strokeLineCap="round"
+        android:strokeWidth="3.0" />
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M54,78 L54,84"
+        android:strokeColor="#00E5FF"
+        android:strokeLineCap="round"
+        android:strokeWidth="3.0" />
 </vector>
