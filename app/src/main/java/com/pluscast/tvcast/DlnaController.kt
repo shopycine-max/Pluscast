@@ -37,6 +37,7 @@ class DlnaController(private val context: Context? = null) {
 
     companion object {
         private const val TAG = "PlusCastDlna"
+        private const val USER_AGENT = "PlusCast/1.0 (UPnP/1.0; Android)"
     }
 
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
@@ -199,9 +200,28 @@ class DlnaController(private val context: Context? = null) {
         }
 
         val serviceUrn = device.serviceType.ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
+        val resolvedMime = resolveMimeType(mediaUrl, mimeType)
+
+        // Best-effort Stop before setting a new URI so previous IPTV/media session closes cleanly
+        val stopSoap = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:Stop xmlns:u="$serviceUrn">
+                  <InstanceID>0</InstanceID>
+                </u:Stop>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        sendSoapAction(
+            controlUrl = device.controlUrl,
+            soapAction = "\"$serviceUrn#Stop\"",
+            body = stopSoap
+        )
+
         val escapedUrl = escapeXml(mediaUrl)
         val escapedTitle = escapeXml(title)
-        val escapedMime = escapeXml(mimeType)
+        val escapedMime = escapeXml(resolvedMime)
         val protocolInfo = "http-get:*:$escapedMime:*"
 
         val rawDidl =
@@ -265,6 +285,19 @@ class DlnaController(private val context: Context? = null) {
         DlnaPlayResult(true, "Playing")
     }
 
+    private fun resolveMimeType(url: String, fallbackMime: String): String {
+        val lower = url.lowercase(Locale.US)
+        return when {
+            lower.contains(".m3u8") -> "application/x-mpegURL"
+            lower.endsWith(".ts") || lower.contains(".ts?") -> "video/mp2t"
+            lower.contains(".mp4") -> "video/mp4"
+            lower.contains(".mkv") -> "video/x-matroska"
+            lower.contains(".webm") -> "video/webm"
+            lower.contains(".mp3") -> "audio/mpeg"
+            else -> fallbackMime.ifBlank { "video/mp4" }
+        }
+    }
+
     private fun getLocalWifiIpv4Address(wifiManager: WifiManager?): InetAddress? {
         try {
             @Suppress("DEPRECATION")
@@ -303,6 +336,7 @@ class DlnaController(private val context: Context? = null) {
                 connectTimeout = 3000
                 readTimeout = 3000
                 requestMethod = "GET"
+                setRequestProperty("User-Agent", USER_AGENT)
             }
             if (conn.responseCode !in 200..299) return null
 
@@ -359,6 +393,7 @@ class DlnaController(private val context: Context? = null) {
                 readTimeout = 5000
                 requestMethod = "POST"
                 doOutput = true
+                setRequestProperty("User-Agent", USER_AGENT)
                 setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
                 setRequestProperty("SOAPAction", soapAction)
             }
