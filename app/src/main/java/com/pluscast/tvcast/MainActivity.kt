@@ -5,9 +5,11 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
@@ -56,13 +58,17 @@ class MainActivity : AppCompatActivity() {
         // India IPTV M3U playlist link (UI mein kahin nahi dikhega)
         private const val DEFAULT_PLAYLIST_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
 
-        // Dark TV / IPTV palette
-        private const val BG_PRIMARY = "#090D16"
-        private const val BG_SURFACE = "#111827"
-        private const val BG_CARD = "#151F32"
-        private const val BORDER_SUBTLE = "#24324D"
+        // Refined Dark Broadcast / TV Palette
+        private const val BG_PRIMARY = "#070B12"
+        private const val BG_GRADIENT_TOP = "#0D1524"
+        private const val BG_SURFACE = "#101826"
+        private const val BG_CARD = "#131D30"
+        private const val BG_BADGE = "#12243B"
+        private const val BORDER_SUBTLE = "#1F2D46"
+        private const val BORDER_CARD = "#22324F"
         private const val ACCENT_CYAN = "#00E5FF"
-        private const val ACCENT_GOLD = "#FACC15"
+        private const val ACCENT_SKY = "#38BDF8"
+        private const val ACCENT_GOLD = "#FBBF24"
         private const val TEXT_PRIMARY = "#F8FAFC"
         private const val TEXT_SECONDARY = "#94A3B8"
     }
@@ -143,7 +149,13 @@ class MainActivity : AppCompatActivity() {
     private fun buildProfessionalUi(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor(BG_PRIMARY))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(
+                    Color.parseColor(BG_GRADIENT_TOP),
+                    Color.parseColor(BG_PRIMARY)
+                )
+            )
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -163,7 +175,7 @@ class MainActivity : AppCompatActivity() {
         val logoView = ImageView(this).apply {
             setImageDrawable(createLogoDrawable())
             contentDescription = "PlusCast IPTV Logo"
-            val lp = LinearLayout.LayoutParams(dp(40), dp(40))
+            val lp = LinearLayout.LayoutParams(dp(44), dp(44))
             lp.marginEnd = dp(12)
             layoutParams = lp
         }
@@ -176,18 +188,18 @@ class MainActivity : AppCompatActivity() {
         val tvTitle = TextView(this).apply {
             text = "PLUSCAST IPTV"
             setTextColor(Color.parseColor(TEXT_PRIMARY))
-            textSize = 19f
+            textSize = 19.5f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            letterSpacing = 0.03f
+            letterSpacing = 0.04f
         }
 
         val dlnaBadge = TextView(this).apply {
             text = "DLNA: Scan"
             setTextColor(Color.parseColor(ACCENT_CYAN))
-            textSize = 12f
+            textSize = 11.5f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             background = createPillDrawable(
-                fillHex = "#102536",
+                fillHex = BG_BADGE,
                 strokeHex = "#1E4966",
                 radiusDp = 999
             )
@@ -537,38 +549,67 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createLogoDrawable(): Drawable {
-        val size = dp(38).coerceAtLeast(24)
+        val size = dp(44).coerceAtLeast(28)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
+        val fSize = size.toFloat()
+        val inset = fSize * 0.06f
+        val rect = RectF(inset, inset, fSize - inset, fSize - inset)
+        val corner = fSize * 0.28f
+
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#102536")
             style = Paint.Style.FILL
+            shader = LinearGradient(
+                0f, 0f, fSize, fSize,
+                intArrayOf(
+                    Color.parseColor("#13253E"),
+                    Color.parseColor("#0B1322")
+                ),
+                null,
+                Shader.TileMode.CLAMP
+            )
         }
+
         val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor(ACCENT_CYAN)
             style = Paint.Style.STROKE
-            strokeWidth = dp(2).toFloat().coerceAtLeast(2f)
+            strokeWidth = (fSize * 0.048f).coerceAtLeast(2f)
+            shader = LinearGradient(
+                0f, 0f, fSize, fSize,
+                intArrayOf(
+                    Color.parseColor(ACCENT_CYAN),
+                    Color.parseColor(ACCENT_SKY)
+                ),
+                null,
+                Shader.TileMode.CLAMP
+            )
         }
+
+        canvas.drawRoundRect(rect, corner, corner, bgPaint)
+        canvas.drawRoundRect(rect, corner, corner, borderPaint)
+
+        // Broadcast play mark
         val playPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor(ACCENT_CYAN)
             style = Paint.Style.FILL
         }
-
-        val rect = RectF(2f, 2f, (size - 2).toFloat(), (size - 2).toFloat())
-        canvas.drawRoundRect(rect, dp(10).toFloat(), dp(10).toFloat(), bgPaint)
-        canvas.drawRoundRect(rect, dp(10).toFloat(), dp(10).toFloat(), borderPaint)
-
-        val cx = size / 2f
-        val cy = size / 2f
-        val r = size * 0.22f
-        val path = Path().apply {
+        val cx = fSize * 0.46f
+        val cy = fSize * 0.54f
+        val r = fSize * 0.20f
+        val playPath = Path().apply {
             moveTo(cx - r * 0.65f, cy - r)
             lineTo(cx + r * 1.15f, cy)
             lineTo(cx - r * 0.65f, cy + r)
             close()
         }
-        canvas.drawPath(path, playPaint)
+        canvas.drawPath(playPath, playPaint)
+
+        // Subtle gold live dot at top-right
+        val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor(ACCENT_GOLD)
+            style = Paint.Style.FILL
+        }
+        canvas.drawCircle(fSize * 0.74f, fSize * 0.28f, (fSize * 0.065f).coerceAtLeast(2f), dotPaint)
 
         return BitmapDrawable(resources, bitmap)
     }
@@ -613,7 +654,7 @@ class MainActivity : AppCompatActivity() {
                     shape = GradientDrawable.RECTANGLE
                     cornerRadius = d(14).toFloat()
                     setColor(Color.parseColor(BG_CARD))
-                    setStroke(d(1), Color.parseColor(BORDER_SUBTLE))
+                    setStroke(d(1), Color.parseColor(BORDER_CARD))
                 }
                 setPadding(d(12), d(12), d(12), d(12))
                 val lp = RecyclerView.LayoutParams(
@@ -629,7 +670,7 @@ class MainActivity : AppCompatActivity() {
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
                     cornerRadius = d(10).toFloat()
-                    setColor(Color.parseColor("#102536"))
+                    setColor(Color.parseColor(BG_BADGE))
                     setStroke(d(1), Color.parseColor("#1E4966"))
                 }
                 setPadding(d(4), d(4), d(4), d(4))
