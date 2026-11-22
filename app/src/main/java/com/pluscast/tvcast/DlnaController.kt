@@ -46,6 +46,9 @@ class DlnaController(private val context: Context? = null) {
             val locations = linkedSetOf<String>()
 
             val appContext = context?.applicationContext
+            if (appContext != null) {
+                LocalMediaServer.init(appContext)
+            }
             val wifiManager = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             val multicastLock = try {
                 wifiManager?.createMulticastLock("PlusCastDlnaLock")?.apply {
@@ -192,15 +195,27 @@ class DlnaController(private val context: Context? = null) {
             return@withContext DlnaPlayResult(false, "Control URL missing")
         }
 
-        if (mediaUrl.contains("://127.0.0.1") || mediaUrl.contains("://localhost")) {
-            Log.w(
-                TAG,
-                "mediaUrl uses loopback address ($mediaUrl); external renderer may not reach it."
-            )
+        val appContext = context?.applicationContext
+        if (appContext != null) {
+            LocalMediaServer.init(appContext)
+        }
+
+        val effectiveUrl = if (isLocalSource(mediaUrl)) {
+            if (appContext == null) {
+                return@withContext DlnaPlayResult(false, "Context missing for local media")
+            }
+            LocalMediaServer.registerAndGetUrl(appContext, mediaUrl, mimeType)
+                ?: return@withContext DlnaPlayResult(false, "Local Wi-Fi IP / server start fail")
+        } else {
+            mediaUrl
+        }
+
+        if (effectiveUrl.contains("://127.0.0.1") || effectiveUrl.contains("://localhost")) {
+            return@withContext DlnaPlayResult(false, "Loopback URL not reachable by TV")
         }
 
         val serviceUrn = device.serviceType.ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
-        val resolvedMime = resolveMimeType(mediaUrl, mimeType)
+        val resolvedMime = resolveMimeType(effectiveUrl, mimeType)
 
         // Best-effort Stop before setting a new URI so previous IPTV/media session closes cleanly
         val stopSoap = """
@@ -219,10 +234,11 @@ class DlnaController(private val context: Context? = null) {
             body = stopSoap
         )
 
-        val escapedUrl = escapeXml(mediaUrl)
+        val escapedUrl = escapeXml(effectiveUrl)
         val escapedTitle = escapeXml(title)
         val escapedMime = escapeXml(resolvedMime)
-        val protocolInfo = "http-get:*:$escapedMime:*"
+        val dlnaFlags = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+        val protocolInfo = "http-get:*:$escapedMime:$dlnaFlags"
 
         val rawDidl =
             """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
@@ -258,7 +274,7 @@ class DlnaController(private val context: Context? = null) {
             return@withContext DlnaPlayResult(false, "SetURI fail: ${setUriRes.message}")
         }
 
-        delay(250)
+        delay(300)
 
         val playSoap = """
             <?xml version="1.0" encoding="utf-8"?>
@@ -283,6 +299,15 @@ class DlnaController(private val context: Context? = null) {
         }
 
         DlnaPlayResult(true, "Playing")
+    }
+
+    private fun isLocalSource(url: String): Boolean {
+        val lower = url.trim().lowercase(Locale.US)
+        return lower.startsWith("content://") ||
+            lower.startsWith("file://") ||
+            lower.startsWith("/storage/") ||
+            lower.startsWith("/sdcard/") ||
+            lower.startsWith("/mnt/")
     }
 
     private fun resolveMimeType(url: String, fallbackMime: String): String {
