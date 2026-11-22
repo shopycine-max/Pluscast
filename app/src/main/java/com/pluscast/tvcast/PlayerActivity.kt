@@ -21,6 +21,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -313,6 +314,37 @@ class PlayerActivity : AppCompatActivity() {
             }
 
             exoPlayer.addListener(object : Player.Listener {
+                override fun onTracksChanged(tracks: Tracks) {
+                    var hasSupportedAudio = false
+                    val audioMimeTypes = mutableListOf<String>()
+
+                    for (group in tracks.groups) {
+                        if (group.type == C.TRACK_TYPE_AUDIO) {
+                            for (i in 0 until group.length) {
+                                val format = group.getTrackFormat(i)
+                                format.sampleMimeType?.let { audioMimeTypes.add(it) }
+                                if (group.isTrackSelected(i) && group.isTrackSupported(i)) {
+                                    hasSupportedAudio = true
+                                }
+                            }
+                        }
+                    }
+
+                    if (audioMimeTypes.isEmpty()) {
+                        Toast.makeText(
+                            this@PlayerActivity,
+                            "Is channel mein audio track nahi mila",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else if (!hasSupportedAudio) {
+                        Toast.makeText(
+                            this@PlayerActivity,
+                            "Unsupported audio codec: ${audioMimeTypes.distinct().joinToString()}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+
                 override fun onPlayerError(error: PlaybackException) {
                     Toast.makeText(
                         this@PlayerActivity,
