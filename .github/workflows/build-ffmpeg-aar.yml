@@ -16,10 +16,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK and NDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          ndk-version: '26.1.10909125'
+
+      - name: Install Android NDK via sdkmanager
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Install build tools (cmake, ninja, ffmpeg)
         run: |
@@ -32,13 +35,12 @@ jobs:
 
       - name: Build FFmpeg native libs and decoder AAR
         env:
-          NDK_PATH: $ANDROID_NDK_ROOT
+          NDK_PATH: /usr/local/lib/android/sdk/ndk/26.1.10909125
           FFMPEG_PATH: $HOME/ffmpeg
         run: |
           git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_PATH"
           cd media3/libraries/decoder_ffmpeg/src/main/jni
 
-          ENABLED_DECODERS="mp2 mp2float mp3 ac3 eac3 aac aac_latm dca vorbis opus flac alac"
           for abi in arm64-v8a armeabi-v7a; do
             ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_PATH" "$abi" --enable-decoder=mp2 --enable-decoder=mp2float --enable-decoder=mp3 --enable-decoder=ac3 --enable-decoder=eac3 --enable-decoder=dca
           done
