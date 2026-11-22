@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -26,6 +27,7 @@ object M3uPlaylistParser {
     private const val CACHE_FILENAME = "pluscast_in_cache.m3u"
     private const val PREFS_NAME = "pluscast_m3u_cache_prefs"
     private const val KEY_LAST_FETCH_MS = "last_fetch_ms"
+    private const val MAX_PLAYLIST_BYTES = 20 * 1024 * 1024 // 20 MB safety guard
 
     const val DEFAULT_PLAYLIST_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
     const val DAILY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
@@ -64,7 +66,8 @@ object M3uPlaylistParser {
     ): List<IptvChannel> =
         withContext(Dispatchers.IO) {
             val appCtx = context?.applicationContext
-            val cleanUrl = playlistUrl.trim().ifEmpty { DEFAULT_PLAYLIST_URL }
+            val rawUrl = playlistUrl.trim().ifEmpty { DEFAULT_PLAYLIST_URL }
+            val cleanUrl = if (isValidHttpUrl(rawUrl)) rawUrl else DEFAULT_PLAYLIST_URL
             val cacheFile = appCtx?.let { File(it.cacheDir, CACHE_FILENAME) }
 
             val hasValidCache = cacheFile != null && cacheFile.exists() && cacheFile.length() > 0L
@@ -93,19 +96,19 @@ object M3uPlaylistParser {
                     return@withContext readFromCache(cacheFile)
                 }
 
-                val rawText = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8), 64 * 1024)
-                    .use(BufferedReader::readText)
-
-                if (rawText.isBlank()) {
+                val bytes = readBoundedBytes(conn.inputStream, MAX_PLAYLIST_BYTES)
+                if (bytes.isEmpty()) {
                     return@withContext readFromCache(cacheFile)
                 }
 
-                val parsed = parseReader(BufferedReader(rawText.reader(), 32 * 1024))
+                val parsed = BufferedReader(InputStreamReader(bytes.inputStream(), Charsets.UTF_8), 32 * 1024)
+                    .use { parseReader(it) }
+
                 if (parsed.isNotEmpty()) {
                     markRefreshedNow(appCtx)
                     if (cacheFile != null) {
                         try {
-                            cacheFile.writeText(rawText, Charsets.UTF_8)
+                            cacheFile.writeBytes(bytes)
                         } catch (_: Exception) {
                         }
                     }
@@ -120,6 +123,24 @@ object M3uPlaylistParser {
                 conn?.disconnect()
             }
         }
+
+    private fun readBoundedBytes(input: InputStream, maxBytes: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream(64 * 1024)
+        val buf = ByteArray(16 * 1024)
+        var total = 0
+        input.use { stream ->
+            while (true) {
+                val read = stream.read(buf)
+                if (read <= 0) break
+                total += read
+                if (total > maxBytes) {
+                    throw IllegalStateException("Playlist size exceeded limit ($maxBytes bytes)")
+                }
+                out.write(buf, 0, read)
+            }
+        }
+        return out.toByteArray()
+    }
 
     private fun readFromCache(cacheFile: File?): List<IptvChannel> {
         if (cacheFile == null || !cacheFile.exists() || cacheFile.length() <= 0L) {
@@ -154,7 +175,9 @@ object M3uPlaylistParser {
                 pendingGroup = groupMatch?.groupValues?.getOrNull(1)?.trim()
                     .takeUnless { it.isNullOrEmpty() } ?: "All"
 
-                pendingLogo = TVG_LOGO_REGEX.find(line)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                val rawLogo = TVG_LOGO_REGEX.find(line)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                pendingLogo = if (isValidHttpUrl(rawLogo)) rawLogo else ""
+
                 pendingLang = TVG_LANG_REGEX.find(line)?.groupValues?.getOrNull(1)?.trim().orEmpty()
 
                 val commaIdx = line.lastIndexOf(',')
@@ -170,12 +193,15 @@ object M3uPlaylistParser {
             }
 
             if (line.startsWith("#EXTVLCOPT:", ignoreCase = true)) {
-                VLC_UA_REGEX.find(line)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }?.let {
-                    pendingUserAgent = it
-                }
-                VLC_REF_REGEX.find(line)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }?.let {
-                    pendingReferrer = it
-                }
+                VLC_UA_REGEX.find(line)?.groupValues?.getOrNull(1)?.trim()
+                    ?.let(::sanitizeHeaderValue)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { pendingUserAgent = it }
+
+                VLC_REF_REGEX.find(line)?.groupValues?.getOrNull(1)?.trim()
+                    ?.let(::sanitizeHeaderValue)
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.let { pendingReferrer = it }
                 continue
             }
 
@@ -183,9 +209,7 @@ object M3uPlaylistParser {
                 continue
             }
 
-            if (line.startsWith("http://", ignoreCase = true) ||
-                line.startsWith("https://", ignoreCase = true)
-            ) {
+            if (isValidHttpUrl(line)) {
                 val finalName = pendingName?.takeIf { it.isNotBlank() } ?: "Channel $indexCounter"
                 channels.add(
                     IptvChannel(
@@ -211,5 +235,15 @@ object M3uPlaylistParser {
 
         Log.d(TAG, "Parsed playlist -> ${channels.size} total channels")
         return channels
+    }
+
+    private fun isValidHttpUrl(url: String): Boolean {
+        if (url.isBlank() || url.any { it.isISOControl() || it.isWhitespace() }) return false
+        return url.startsWith("http://", ignoreCase = true) ||
+            url.startsWith("https://", ignoreCase = true)
+    }
+
+    private fun sanitizeHeaderValue(value: String): String {
+        return value.filterNot { it == '\r' || it == '\n' || it.isISOControl() }.trim()
     }
 }
