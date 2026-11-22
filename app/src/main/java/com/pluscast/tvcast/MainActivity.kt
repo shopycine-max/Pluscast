@@ -1,8 +1,15 @@
 package com.pluscast.tvcast
 
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.Editable
@@ -11,9 +18,9 @@ import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
 import android.widget.EditText
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -114,6 +121,14 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        val logoView = ImageView(this).apply {
+            setImageDrawable(createLogoDrawable())
+            contentDescription = "PlusCast IPTV Logo"
+            val lp = LinearLayout.LayoutParams(dp(40), dp(40))
+            lp.marginEnd = dp(12)
+            layoutParams = lp
+        }
+
         val brandBlock = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -163,6 +178,7 @@ class MainActivity : AppCompatActivity() {
 
         brandBlock.addView(tvTitle)
         brandBlock.addView(dlnaBadge)
+        headerRow.addView(logoView)
         headerRow.addView(brandBlock)
         headerRow.addView(refreshBtn)
         root.addView(headerRow)
@@ -464,6 +480,43 @@ class MainActivity : AppCompatActivity() {
             .getString(KEY_PLAYLIST_URL, null)
             ?.trim()
             .orEmpty()
+    }
+
+    private fun createLogoDrawable(): Drawable {
+        val size = dp(38).coerceAtLeast(24)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#102536")
+            style = Paint.Style.FILL
+        }
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor(ACCENT_CYAN)
+            style = Paint.Style.STROKE
+            strokeWidth = dp(2).toFloat().coerceAtLeast(2f)
+        }
+        val playPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor(ACCENT_CYAN)
+            style = Paint.Style.FILL
+        }
+
+        val rect = RectF(2f, 2f, (size - 2).toFloat(), (size - 2).toFloat())
+        canvas.drawRoundRect(rect, dp(10).toFloat(), dp(10).toFloat(), bgPaint)
+        canvas.drawRoundRect(rect, dp(10).toFloat(), dp(10).toFloat(), borderPaint)
+
+        val cx = size / 2f
+        val cy = size / 2f
+        val r = size * 0.22f
+        val path = Path().apply {
+            moveTo(cx - r * 0.65f, cy - r)
+            lineTo(cx + r * 1.15f, cy)
+            lineTo(cx - r * 0.65f, cy + r)
+            close()
+        }
+        canvas.drawPath(path, playPaint)
+
+        return BitmapDrawable(resources, bitmap)
     }
 
     private fun dp(value: Int): Int =
