@@ -10,9 +10,15 @@ import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.MulticastSocket
+import java.net.NetworkInterface
 import java.net.SocketTimeoutException
 import java.net.URL
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 
 data class DlnaDevice(
@@ -26,7 +32,7 @@ class DlnaController(private val context: Context? = null) {
         private const val TAG = "PlusCastDlna"
     }
 
-    suspend fun discoverRenderers(timeoutMs: Int = 4000): List<DlnaDevice> =
+    suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
             val found = linkedMapOf<String, DlnaDevice>()
             val locations = linkedSetOf<String>()
@@ -42,6 +48,15 @@ class DlnaController(private val context: Context? = null) {
                 null
             }
 
+            val localWifiIp = getLocalWifiIpv4Address(wifiManager)
+            val networkInterface = localWifiIp?.let {
+                try {
+                    NetworkInterface.getByInetAddress(it)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+
             val searchTargets = listOf(
                 "ssdp:all",
                 "upnp:rootdevice",
@@ -49,49 +64,97 @@ class DlnaController(private val context: Context? = null) {
                 "urn:schemas-upnp-org:service:AVTransport:1"
             )
 
-            var socket: DatagramSocket? = null
+            var unicastSocket: DatagramSocket? = null
+            var multicastSocket: MulticastSocket? = null
+            val group = InetAddress.getByName("239.255.255.250")
+
             try {
-                socket = DatagramSocket().apply {
+                unicastSocket = if (localWifiIp != null) {
+                    DatagramSocket(InetSocketAddress(localWifiIp, 0))
+                } else {
+                    DatagramSocket()
+                }.apply {
                     broadcast = true
-                    soTimeout = 600
+                    soTimeout = 500
                 }
 
-                val group = InetAddress.getByName("239.255.255.250")
+                multicastSocket = MulticastSocket(1900).apply {
+                    reuseAddress = true
+                    soTimeout = 500
+                    try {
+                        if (networkInterface != null) {
+                            setNetworkInterface(networkInterface)
+                        }
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        if (networkInterface != null) {
+                            joinGroup(InetSocketAddress(group, 1900), networkInterface)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            joinGroup(group)
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+
                 for (st in searchTargets) {
                     val query = buildString {
                         append("M-SEARCH * HTTP/1.1\r\n")
                         append("HOST: 239.255.255.250:1900\r\n")
                         append("MAN: \"ssdp:discover\"\r\n")
-                        append("MX: 2\r\n")
+                        append("MX: 3\r\n")
                         append("ST: $st\r\n\r\n")
                     }.toByteArray(Charsets.UTF_8)
 
-                    socket.send(DatagramPacket(query, query.size, group, 1900))
+                    val packet = DatagramPacket(query, query.size, group, 1900)
+                    try {
+                        unicastSocket.send(packet)
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        multicastSocket.send(packet)
+                    } catch (_: Exception) {
+                    }
                 }
 
                 val deadline = System.currentTimeMillis() + timeoutMs
                 val buffer = ByteArray(4096)
 
                 while (System.currentTimeMillis() < deadline) {
-                    try {
-                        val packet = DatagramPacket(buffer, buffer.size)
-                        socket.receive(packet)
-                        val text = String(packet.data, 0, packet.length, Charsets.UTF_8)
-                        extractHeader(text, "LOCATION")?.trim()?.takeIf { it.isNotEmpty() }?.let {
-                            locations.add(it)
+                    for (sock in listOfNotNull(unicastSocket, multicastSocket)) {
+                        try {
+                            val respPacket = DatagramPacket(buffer, buffer.size)
+                            sock.receive(respPacket)
+                            val text = String(respPacket.data, 0, respPacket.length, Charsets.UTF_8)
+                            extractHeader(text, "LOCATION")?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                                locations.add(it)
+                                Log.d(TAG, "SSDP LOCATION: $it")
+                            }
+                        } catch (_: SocketTimeoutException) {
+                        } catch (e: Exception) {
+                            Log.w(TAG, "SSDP receive warning", e)
                         }
-                    } catch (_: SocketTimeoutException) {
-                        // Keep listening until timeout
-                    } catch (e: Exception) {
-                        Log.w(TAG, "SSDP receive error", e)
-                        break
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "SSDP send/receive error", e)
+                Log.e(TAG, "SSDP scan error", e)
             } finally {
                 try {
-                    socket?.close()
+                    if (networkInterface != null) {
+                        multicastSocket?.leaveGroup(InetSocketAddress(group, 1900), networkInterface)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        multicastSocket?.leaveGroup(group)
+                    }
+                } catch (_: Exception) {
+                }
+                try {
+                    multicastSocket?.close()
+                } catch (_: Exception) {
+                }
+                try {
+                    unicastSocket?.close()
                 } catch (_: Exception) {
                 }
                 try {
@@ -166,13 +229,43 @@ class DlnaController(private val context: Context? = null) {
         )
     }
 
+    private fun getLocalWifiIpv4Address(wifiManager: WifiManager?): InetAddress? {
+        try {
+            @Suppress("DEPRECATION")
+            val ipInt = wifiManager?.connectionInfo?.ipAddress ?: 0
+            if (ipInt != 0) {
+                val bytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(ipInt).array()
+                val addr = InetAddress.getByAddress(bytes)
+                if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                    return addr
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            for (intf in interfaces) {
+                if (!intf.isUp || intf.isLoopback || intf.isVirtual) continue
+                val addrs = intf.inetAddresses
+                for (addr in addrs) {
+                    if (addr is Inet4Address && !addr.isLoopbackAddress && addr.isSiteLocalAddress) {
+                        return addr
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
     private fun parseDeviceDescription(locationUrl: String): DlnaDevice? {
         var conn: HttpURLConnection? = null
         return try {
             val baseUrl = URL(locationUrl)
             conn = (baseUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 2500
-                readTimeout = 2500
+                connectTimeout = 3000
+                readTimeout = 3000
                 requestMethod = "GET"
             }
             if (conn.responseCode !in 200..299) return null
@@ -202,7 +295,7 @@ class DlnaController(private val context: Context? = null) {
     }
 
     private fun extractAvTransportControlUrl(xml: String): String? {
-        val serviceRegex = Regex("<service>([\\s\\S]*?)</service>", RegexOption.IGNORE_CASE)
+        val serviceRegex = Regex("<(?:[a-zA-Z0-9_-]+:)?service\\b[^>]*>([\\s\\S]*?)</(?:[a-zA-Z0-9_-]+:)?service>", RegexOption.IGNORE_CASE)
         for (match in serviceRegex.findAll(xml)) {
             val block = match.groupValues[1]
             val serviceType = extractTagValue(block, "serviceType") ?: ""
@@ -211,7 +304,7 @@ class DlnaController(private val context: Context? = null) {
                 if (!ctrl.isNullOrBlank()) return ctrl
             }
         }
-        return null
+        return extractTagValue(xml, "controlURL")
     }
 
     private fun sendSoapAction(controlUrl: String, soapAction: String, body: String): Boolean {
