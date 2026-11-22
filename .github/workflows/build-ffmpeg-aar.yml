@@ -32,15 +32,17 @@ jobs:
 
       - name: Build FFmpeg native libs and decoder AAR
         env:
-          FFMPEG_PATH: $HOME/ffmpeg
           ENABLED_DECODERS: "mp2 mp2float mp3 ac3 eac3 aac aac_latm dca vorbis opus flac alac"
         run: |
-          git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_PATH"
-
           NDK_DIR="$HOME/ndk-bundle/android-ndk-r26b"
-          cd media3/libraries/decoder_ffmpeg/src/main/jni
+          MODULE_DIR="$GITHUB_WORKSPACE/media3/libraries/decoder_ffmpeg/src/main"
+          JNI_DIR="$MODULE_DIR/jni"
+
+          git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git "$JNI_DIR/ffmpeg"
+
+          cd "$JNI_DIR"
           for abi in arm64-v8a armeabi-v7a; do
-            ANDROID_ABI="$abi" ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_DIR" "linux-x86_64" "24"
+            ./build_ffmpeg.sh "$MODULE_DIR" "$NDK_DIR" "linux-x86_64" "$abi"
           done
 
           cd "$GITHUB_WORKSPACE/media3"
