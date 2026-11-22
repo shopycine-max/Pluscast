@@ -11,7 +11,8 @@ import java.net.URL
 data class IptvChannel(
     val name: String,
     val url: String,
-    val group: String = "All"
+    val group: String = "All",
+    val logoUrl: String = ""
 )
 
 object M3uPlaylistParser {
@@ -19,6 +20,7 @@ object M3uPlaylistParser {
     private const val TAG = "PlusCastM3uParser"
     private val GROUP_REGEX = Regex("""group-title=["']([^"']*)["']""", RegexOption.IGNORE_CASE)
     private val TVG_NAME_REGEX = Regex("""tvg-name=["']([^"']*)["']""", RegexOption.IGNORE_CASE)
+    private val TVG_LOGO_REGEX = Regex("""tvg-logo=["']([^"']*)["']""", RegexOption.IGNORE_CASE)
 
     suspend fun fetchChannels(playlistUrl: String): List<IptvChannel> =
         withContext(Dispatchers.IO) {
@@ -46,6 +48,7 @@ object M3uPlaylistParser {
                 val channels = ArrayList<IptvChannel>(2048)
                 var pendingName: String? = null
                 var pendingGroup: String = "All"
+                var pendingLogo: String = ""
                 var indexCounter = 1
 
                 BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8), 64 * 1024).use { reader ->
@@ -58,6 +61,8 @@ object M3uPlaylistParser {
                             val groupMatch = GROUP_REGEX.find(line)
                             pendingGroup = groupMatch?.groupValues?.getOrNull(1)?.trim()
                                 .takeUnless { it.isNullOrEmpty() } ?: "All"
+
+                            pendingLogo = TVG_LOGO_REGEX.find(line)?.groupValues?.getOrNull(1)?.trim().orEmpty()
 
                             val commaIdx = line.lastIndexOf(',')
                             val afterComma = if (commaIdx >= 0) line.substring(commaIdx + 1).trim() else ""
@@ -83,12 +88,14 @@ object M3uPlaylistParser {
                                 IptvChannel(
                                     name = finalName,
                                     url = line,
-                                    group = pendingGroup
+                                    group = pendingGroup,
+                                    logoUrl = pendingLogo
                                 )
                             )
                             indexCounter++
                             pendingName = null
                             pendingGroup = "All"
+                            pendingLogo = ""
                         }
                     }
                 }
