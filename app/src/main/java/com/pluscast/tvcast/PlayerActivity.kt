@@ -26,7 +26,6 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -42,6 +41,7 @@ import com.google.android.gms.cast.framework.CastContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 class PlayerActivity : AppCompatActivity() {
 
@@ -55,8 +55,8 @@ class PlayerActivity : AppCompatActivity() {
     private var playerView: PlayerView? = null
     private var progressBar: ProgressBar? = null
     private var mediaUrl: String = ""
-    private var mediaTitle: String = "PlusCast Media"
-    private var mimeType: String = "video/mp4"
+    private var mediaTitle: String = "PlusCast IPTV"
+    private var mimeType: String = "application/x-mpegURL"
     private var isCastingToTv: Boolean = false
     private var isScreenLocked: Boolean = false
     private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = FILL
@@ -84,17 +84,21 @@ class PlayerActivity : AppCompatActivity() {
             .takeUnless { it.isNullOrEmpty() }
             ?: intent.getStringExtra(EXTRA_MEDIA_TITLE)?.trim()
                 .takeUnless { it.isNullOrEmpty() }
-            ?: "PlusCast Media"
+            ?: "PlusCast IPTV"
+
+        if (!isSupportedNetworkStream(mediaUrl)) {
+            Toast.makeText(
+                this,
+                "Sirf direct IPTV/network stream (HTTP/HTTPS) supported hai",
+                Toast.LENGTH_LONG
+            ).show()
+            finish()
+            return
+        }
 
         mimeType = intent.getStringExtra(EXTRA_MIME_TYPE)?.trim()
             .takeUnless { it.isNullOrEmpty() }
             ?: detectMimeType(mediaUrl)
-
-        if (mediaUrl.isEmpty()) {
-            Toast.makeText(this, "Media URL nahi mila", Toast.LENGTH_SHORT).show()
-            finish()
-            return
-        }
 
         applyImmersiveSystemBars(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
         addRotateButton()
@@ -118,6 +122,15 @@ class PlayerActivity : AppCompatActivity() {
             DlnaDeviceStore.saveLastDevice(this, device)
             startDlnaPlayback(device)
         }
+    }
+
+    private fun isSupportedNetworkStream(url: String): Boolean {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) return false
+        val lower = trimmed.lowercase(Locale.US)
+        if (!(lower.startsWith("http://") || lower.startsWith("https://"))) return false
+        if (lower.contains("youtube.com/") || lower.contains("youtu.be/")) return false
+        return true
     }
 
     private fun applyImmersiveSystemBars(isLandscape: Boolean) {
@@ -422,7 +435,7 @@ class PlayerActivity : AppCompatActivity() {
             url.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
             url.contains(".webm", ignoreCase = true) -> "video/webm"
             url.contains(".mp3", ignoreCase = true) -> "audio/mpeg"
-            else -> "video/mp4"
+            else -> "application/x-mpegURL"
         }
     }
 
@@ -472,7 +485,7 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (player == null && mediaUrl.isNotEmpty()) {
+        if (player == null && isSupportedNetworkStream(mediaUrl)) {
             initializePlayer()
         } else if (!isCastingToTv) {
             player?.playWhenReady = true
@@ -485,15 +498,13 @@ class PlayerActivity : AppCompatActivity() {
             releasePlayer()
 
             val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-                .setUserAgent("PlusCast/1.0 (Android)")
+                .setUserAgent("PlusCast/1.0 (IPTV)")
                 .setConnectTimeoutMs(15_000)
                 .setReadTimeoutMs(25_000)
                 .setAllowCrossProtocolRedirects(true)
 
-            val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
-
             val mediaSourceFactory = DefaultMediaSourceFactory(this)
-                .setDataSourceFactory(dataSourceFactory)
+                .setDataSourceFactory(httpDataSourceFactory)
 
             val loadControl: LoadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
