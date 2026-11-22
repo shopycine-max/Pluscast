@@ -16,11 +16,13 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -41,12 +43,15 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 class PlayerActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_MEDIA_URL = "extra_media_url"
         const val EXTRA_MEDIA_TITLE = "extra_media_title"
+
+        private const val AUTO_HIDE_DELAY_MS = 1600L
 
         private const val BG_PLAYER = "#05080F"
         private const val BG_BAR = "#101826"
@@ -59,11 +64,12 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private val dlnaController by lazy { DlnaController(this) }
+    private val autoHideHandler = Handler(Looper.getMainLooper())
 
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
     private var progressBar: ProgressBar? = null
-    private var topBarView: View? = null
+    private var controlsClusterView: View? = null
     private var unlockPillView: TextView? = null
     private var btnRotate: TextView? = null
     private var btnZoom: TextView? = null
@@ -81,6 +87,12 @@ class PlayerActivity : AppCompatActivity() {
         AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "Zoom",
         AspectRatioFrameLayout.RESIZE_MODE_FILL to "Stretch"
     )
+
+    private val hideControlsRunnable = Runnable {
+        if (!isScreenLocked) {
+            hideControlsCluster()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -142,11 +154,13 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        autoHideHandler.removeCallbacks(hideControlsRunnable)
         player?.playWhenReady = false
         super.onStop()
     }
 
     override fun onDestroy() {
+        autoHideHandler.removeCallbacks(hideControlsRunnable)
         releasePlayer()
         super.onDestroy()
     }
@@ -154,7 +168,53 @@ class PlayerActivity : AppCompatActivity() {
     private fun isLandscape(orientation: Int): Boolean =
         orientation == Configuration.ORIENTATION_LANDSCAPE
 
+    private fun blinkControlsOnTouch() {
+        if (isScreenLocked) {
+            unlockPillView?.let { pill ->
+                pill.visibility = View.VISIBLE
+                pill.alpha = 0.25f
+                pill.animate().alpha(1f).setDuration(130L).start()
+            }
+            return
+        }
+
+        syncOrientationControls(resources.configuration.orientation)
+        controlsClusterView?.let { cluster ->
+            cluster.animate().cancel()
+            cluster.visibility = View.VISIBLE
+            cluster.alpha = 0.2f
+            cluster.animate()
+                .alpha(1f)
+                .setDuration(140L)
+                .withEndAction { scheduleAutoHide() }
+                .start()
+        } ?: scheduleAutoHide()
+    }
+
+    private fun hideControlsCluster() {
+        controlsClusterView?.let { cluster ->
+            cluster.animate().cancel()
+            cluster.animate()
+                .alpha(0f)
+                .setDuration(150L)
+                .withEndAction {
+                    if (!isScreenLocked) {
+                        cluster.visibility = View.GONE
+                    }
+                }
+                .start()
+        }
+    }
+
+    private fun scheduleAutoHide() {
+        autoHideHandler.removeCallbacks(hideControlsRunnable)
+        if (!isScreenLocked) {
+            autoHideHandler.postDelayed(hideControlsRunnable, AUTO_HIDE_DELAY_MS)
+        }
+    }
+
     private fun toggleScreenOrientation() {
+        scheduleAutoHide()
         if (isScreenLocked) {
             Toast.makeText(this, "Screen lock hai, pehle Unlock karein", Toast.LENGTH_SHORT).show()
             return
@@ -185,6 +245,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun cycleZoomMode() {
+        scheduleAutoHide()
         if (!isLandscape(resources.configuration.orientation)) {
             syncOrientationControls(resources.configuration.orientation)
             return
@@ -218,14 +279,18 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun syncLockState() {
         if (isScreenLocked) {
-            topBarView?.visibility = View.GONE
-            playerView?.useController = false
+            autoHideHandler.removeCallbacks(hideControlsRunnable)
+            controlsClusterView?.animate()?.cancel()
+            controlsClusterView?.visibility = View.GONE
             unlockPillView?.visibility = View.VISIBLE
+            unlockPillView?.alpha = 1f
         } else {
             unlockPillView?.visibility = View.GONE
-            topBarView?.visibility = View.VISIBLE
-            playerView?.useController = true
             syncOrientationControls(resources.configuration.orientation)
+            controlsClusterView?.animate()?.cancel()
+            controlsClusterView?.visibility = View.VISIBLE
+            controlsClusterView?.alpha = 1f
+            scheduleAutoHide()
         }
         btnLock?.text = if (isScreenLocked) "🔓 Unlock" else "🔒 Lock"
     }
@@ -239,8 +304,9 @@ class PlayerActivity : AppCompatActivity() {
             )
         }
 
+        // useController = false so no full-screen controller bar line overlays the video
         val pv = PlayerView(this).apply {
-            useController = true
+            useController = false
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
             setBackgroundColor(Color.parseColor(BG_PLAYER))
             layoutParams = FrameLayout.LayoutParams(
@@ -251,6 +317,42 @@ class PlayerActivity : AppCompatActivity() {
         playerView = pv
         root.addView(pv)
 
+        val touchInterceptor = object : View(this) {
+            private var downX = 0f
+            private var downY = 0f
+            private var downTime = 0L
+
+            override fun onTouchEvent(event: MotionEvent): Boolean {
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = event.x
+                        downY = event.y
+                        downTime = System.currentTimeMillis()
+                        return true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        val dx = abs(event.x - downX)
+                        val dy = abs(event.y - downY)
+                        val dt = System.currentTimeMillis() - downTime
+                        if (dx < dp(24) && dy < dp(24) && dt < 500L) {
+                            blinkControlsOnTouch()
+                        }
+                        return true
+                    }
+                }
+                return super.onTouchEvent(event)
+            }
+        }.apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isClickable = true
+            isFocusable = false
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        root.addView(touchInterceptor)
+
         val spinner = ProgressBar(this).apply {
             visibility = View.VISIBLE
             indeterminateTintList = ColorStateList.valueOf(Color.parseColor(ACCENT_CYAN))
@@ -260,69 +362,20 @@ class PlayerActivity : AppCompatActivity() {
         progressBar = spinner
         root.addView(spinner)
 
-        val topBar = LinearLayout(this).apply {
+        // Compact floating controls only (no full-width line across screen)
+        val controlsCluster = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(14).toFloat()
-                setColor(Color.parseColor("#D9101826"))
-                setStroke(dp(1), Color.parseColor(BORDER_BAR))
-            }
-            setPadding(dp(10), dp(8), dp(10), dp(8))
             val lp = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END
             )
-            lp.marginStart = dp(10)
-            lp.marginEnd = dp(10)
             lp.topMargin = dp(10)
+            lp.marginEnd = dp(10)
             layoutParams = lp
         }
-        topBarView = topBar
-
-        val btnBack = TextView(this).apply {
-            text = "←"
-            setTextColor(Color.parseColor(TEXT_PRIMARY))
-            textSize = 18f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            isFocusable = true
-            isClickable = true
-            background = createFocusPillDrawable(
-                normalFill = "transparent",
-                normalStroke = "transparent",
-                focusStroke = ACCENT_CYAN,
-                radiusDp = 10
-            )
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-            setOnClickListener { finish() }
-        }
-
-        val tvTitle = TextView(this).apply {
-            text = mediaTitle
-            setTextColor(Color.parseColor(TEXT_PRIMARY))
-            textSize = 13.5f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            lp.marginEnd = dp(6)
-            layoutParams = lp
-        }
-
-        val controlsScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        }
-
-        val controlsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
+        controlsClusterView = controlsCluster
 
         val rotateBtn = TextView(this).apply {
             text = "↻ Landscape"
@@ -332,7 +385,7 @@ class PlayerActivity : AppCompatActivity() {
             isFocusable = true
             isClickable = true
             background = createFocusPillDrawable(
-                normalFill = BG_BAR,
+                normalFill = "#CC101826",
                 normalStroke = BORDER_BAR,
                 focusStroke = ACCENT_CYAN,
                 radiusDp = 999
@@ -344,7 +397,10 @@ class PlayerActivity : AppCompatActivity() {
             )
             lp.marginEnd = dp(6)
             layoutParams = lp
-            setOnClickListener { toggleScreenOrientation() }
+            setOnClickListener {
+                blinkView(it)
+                toggleScreenOrientation()
+            }
         }
         btnRotate = rotateBtn
 
@@ -356,7 +412,7 @@ class PlayerActivity : AppCompatActivity() {
             isFocusable = true
             isClickable = true
             background = createFocusPillDrawable(
-                normalFill = BG_BAR,
+                normalFill = "#CC101826",
                 normalStroke = BORDER_BAR,
                 focusStroke = ACCENT_GOLD,
                 radiusDp = 999
@@ -368,7 +424,10 @@ class PlayerActivity : AppCompatActivity() {
             )
             lp.marginEnd = dp(6)
             layoutParams = lp
-            setOnClickListener { cycleZoomMode() }
+            setOnClickListener {
+                blinkView(it)
+                cycleZoomMode()
+            }
         }
         btnZoom = zoomBtn
 
@@ -380,7 +439,7 @@ class PlayerActivity : AppCompatActivity() {
             isFocusable = true
             isClickable = true
             background = createFocusPillDrawable(
-                normalFill = BG_BAR,
+                normalFill = "#CC101826",
                 normalStroke = BORDER_BAR,
                 focusStroke = ACCENT_CYAN,
                 radiusDp = 999
@@ -392,7 +451,10 @@ class PlayerActivity : AppCompatActivity() {
             )
             lp.marginEnd = dp(6)
             layoutParams = lp
-            setOnClickListener { toggleScreenLock() }
+            setOnClickListener {
+                blinkView(it)
+                toggleScreenLock()
+            }
         }
         btnLock = lockBtn
 
@@ -403,57 +465,63 @@ class PlayerActivity : AppCompatActivity() {
             isFocusable = true
             isClickable = true
             background = createFocusPillDrawable(
-                normalFill = BG_BAR,
+                normalFill = "#CC101826",
                 normalStroke = BORDER_BAR,
                 focusStroke = ACCENT_CYAN,
                 radiusDp = 999
             )
             setPadding(dp(7), dp(7), dp(7), dp(7))
-            layoutParams = LinearLayout.LayoutParams(dp(34), dp(34))
-            setOnClickListener { triggerCastAction() }
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
+            setOnClickListener {
+                blinkView(it)
+                triggerCastAction()
+            }
         }
         btnCast = castBtn
 
-        controlsRow.addView(rotateBtn)
-        controlsRow.addView(zoomBtn)
-        controlsRow.addView(lockBtn)
-        controlsRow.addView(castBtn)
-        controlsScroll.addView(controlsRow)
-
-        topBar.addView(btnBack)
-        topBar.addView(tvTitle)
-        topBar.addView(controlsScroll)
-        root.addView(topBar)
+        controlsCluster.addView(rotateBtn)
+        controlsCluster.addView(zoomBtn)
+        controlsCluster.addView(lockBtn)
+        controlsCluster.addView(castBtn)
+        root.addView(controlsCluster)
 
         val unlockPill = TextView(this).apply {
             text = "🔓 Unlock"
             visibility = View.GONE
             setTextColor(Color.parseColor(ACCENT_GOLD))
-            textSize = 12.5f
+            textSize = 12f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             isFocusable = true
             isClickable = true
             background = createFocusPillDrawable(
-                normalFill = "#D9101826",
+                normalFill = "#CC101826",
                 normalStroke = ACCENT_GOLD,
                 focusStroke = ACCENT_CYAN,
                 radiusDp = 999
             )
-            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setPadding(dp(12), dp(6), dp(12), dp(6))
             val lp = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP or Gravity.END
             )
-            lp.topMargin = dp(12)
-            lp.marginEnd = dp(12)
+            lp.topMargin = dp(10)
+            lp.marginEnd = dp(10)
             layoutParams = lp
-            setOnClickListener { toggleScreenLock() }
+            setOnClickListener {
+                blinkView(it)
+                toggleScreenLock()
+            }
         }
         unlockPillView = unlockPill
         root.addView(unlockPill)
 
         return root
+    }
+
+    private fun blinkView(v: View) {
+        v.alpha = 0.25f
+        v.animate().alpha(1f).setDuration(130L).start()
     }
 
     private fun applySystemBarInsets(root: View) {
@@ -499,6 +567,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun triggerCastAction() {
+        scheduleAutoHide()
         val currentDevice = selectedDlnaDevice
         if (currentDevice != null) {
             castStreamToDevice(currentDevice)
