@@ -27,6 +27,11 @@ data class DlnaDevice(
     val serviceType: String = "urn:schemas-upnp-org:service:AVTransport:1"
 )
 
+data class DlnaPlayResult(
+    val success: Boolean,
+    val message: String
+)
+
 class DlnaController(private val context: Context? = null) {
 
     companion object {
@@ -180,10 +185,9 @@ class DlnaController(private val context: Context? = null) {
         mediaUrl: String,
         title: String = "PlusCast Media",
         mimeType: String = "video/mp4"
-    ): Boolean = withContext(Dispatchers.IO) {
+    ): DlnaPlayResult = withContext(Dispatchers.IO) {
         if (device.controlUrl.isBlank()) {
-            Log.e(TAG, "Empty controlUrl for ${device.friendlyName}")
-            return@withContext false
+            return@withContext DlnaPlayResult(false, "Control URL missing")
         }
 
         val serviceUrn = device.serviceType.ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
@@ -208,25 +212,22 @@ class DlnaController(private val context: Context? = null) {
             </s:Envelope>
         """.trimIndent()
 
-        var uriSetOk = sendSoapAction(
+        var setUriRes = sendSoapAction(
             controlUrl = device.controlUrl,
             soapAction = "\"$serviceUrn#SetAVTransportURI\"",
             body = buildSetUriSoap(rawDidl)
         )
 
-        // Kuch STB/renderers DIDL metadata parse na kar paane par empty metadata ke saath accept kar lete hain
-        if (!uriSetOk) {
-            Log.w(TAG, "Retrying SetAVTransportURI with empty metadata on ${device.friendlyName}")
-            uriSetOk = sendSoapAction(
+        if (!setUriRes.success) {
+            setUriRes = sendSoapAction(
                 controlUrl = device.controlUrl,
                 soapAction = "\"$serviceUrn#SetAVTransportURI\"",
                 body = buildSetUriSoap("")
             )
         }
 
-        if (!uriSetOk) {
-            Log.e(TAG, "SetAVTransportURI failed on ${device.friendlyName}")
-            return@withContext false
+        if (!setUriRes.success) {
+            return@withContext DlnaPlayResult(false, "SetURI fail: ${setUriRes.message}")
         }
 
         val playSoap = """
@@ -241,11 +242,17 @@ class DlnaController(private val context: Context? = null) {
             </s:Envelope>
         """.trimIndent()
 
-        sendSoapAction(
+        val playRes = sendSoapAction(
             controlUrl = device.controlUrl,
             soapAction = "\"$serviceUrn#Play\"",
             body = playSoap
         )
+
+        if (!playRes.success) {
+            return@withContext DlnaPlayResult(false, "Play fail: ${playRes.message}")
+        }
+
+        DlnaPlayResult(true, "Playing")
     }
 
     private fun getLocalWifiIpv4Address(wifiManager: WifiManager?): InetAddress? {
@@ -302,8 +309,6 @@ class DlnaController(private val context: Context? = null) {
                 ""
             }
 
-            Log.d(TAG, "Device: $friendlyName | Service: $serviceType | ControlURL: $resolvedControlUrl")
-
             DlnaDevice(
                 friendlyName = friendlyName,
                 controlUrl = resolvedControlUrl,
@@ -335,7 +340,7 @@ class DlnaController(private val context: Context? = null) {
         return null to extractTagValue(xml, "controlURL")?.trim()
     }
 
-    private fun sendSoapAction(controlUrl: String, soapAction: String, body: String): Boolean {
+    private fun sendSoapAction(controlUrl: String, soapAction: String, body: String): DlnaPlayResult {
         var conn: HttpURLConnection? = null
         return try {
             val url = URL(controlUrl)
@@ -352,20 +357,24 @@ class DlnaController(private val context: Context? = null) {
                 writer.flush()
             }
             val code = conn.responseCode
-            Log.d(TAG, "SOAP $soapAction -> HTTP $code")
             if (code !in 200..299) {
                 val errBody = try {
                     conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty()
                 } catch (_: Exception) {
                     ""
                 }
-                Log.e(TAG, "SOAP error ($code) on $controlUrl: $errBody")
-                return false
+                val upnpCode = extractTagValue(errBody, "errorCode")?.trim()
+                val upnpDesc = extractTagValue(errBody, "errorDescription")?.trim()
+                val detail = listOfNotNull(
+                    "HTTP $code",
+                    upnpCode?.let { "UPnP $it" },
+                    upnpDesc?.takeIf { it.isNotEmpty() }
+                ).joinToString(" - ")
+                return DlnaPlayResult(false, detail)
             }
-            true
+            DlnaPlayResult(true, "OK")
         } catch (e: Exception) {
-            Log.e(TAG, "SOAP exception on $controlUrl for $soapAction", e)
-            false
+            DlnaPlayResult(false, e.message ?: "Network error")
         } finally {
             conn?.disconnect()
         }
