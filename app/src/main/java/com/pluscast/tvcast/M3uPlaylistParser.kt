@@ -41,7 +41,7 @@ object M3uPlaylistParser {
 
                 val code = conn.responseCode
                 if (code !in 200..299) {
-                    Log.w(TAG, "Playlist HTTP error $code for $cleanUrl")
+                    Log.w(TAG, "Playlist HTTP error $code for$cleanUrl")
                     return@withContext emptyList()
                 }
 
