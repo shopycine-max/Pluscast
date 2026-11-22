@@ -23,6 +23,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -308,9 +309,11 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun initializePlayer() {
         try {
-            val dataSourceFactory = DefaultHttpDataSource.Factory()
+            val httpDataSourceFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent("PlusCast/1.0 (Android)")
                 .setAllowCrossProtocolRedirects(true)
+
+            val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
 
             val mediaSourceFactory = DefaultMediaSourceFactory(this)
                 .setDataSourceFactory(dataSourceFactory)
@@ -424,6 +427,7 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
+        isCastingToTv = false
         releasePlayer()
     }
 
