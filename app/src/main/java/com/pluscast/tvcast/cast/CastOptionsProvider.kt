@@ -12,7 +12,7 @@ class CastOptionsProvider : OptionsProvider {
             .build()
 
         return CastOptions.Builder()
-            .setReceiverApplicationId("CC1AD845") // Default Media Receiver ID
+            .setReceiverApplicationId("CC1AD845")
             .setCastMediaOptions(mediaOptions)
             .build()
     }
