@@ -1,373 +1,511 @@
 package com.pluscast.tvcast
 
 import android.content.pm.ActivityInfo
+import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Typeface
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.TextView
 import android.widget.Toast
-import androidx.annotation.OptIn
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
-import androidx.media3.common.AudioAttributes
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.common.Tracks
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.LoadControl
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import com.google.android.gms.cast.MediaInfo
-import com.google.android.gms.cast.MediaLoadRequestData
-import com.google.android.gms.cast.MediaMetadata
-import com.google.android.gms.cast.framework.CastContext
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.Locale
 
 class PlayerActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_MEDIA_URL = "extra_media_url"
         const val EXTRA_MEDIA_TITLE = "extra_media_title"
-        const val EXTRA_MIME_TYPE = "extra_mime_type"
+
+        private const val BG_PLAYER = "#05080F"
+        private const val BG_BAR = "#101826"
+        private const val BG_BADGE = "#12243B"
+        private const val BORDER_BAR = "#22324F"
+        private const val ACCENT_CYAN = "#00E5FF"
+        private const val ACCENT_GOLD = "#FBBF24"
+        private const val ICON_CAST_SOFT = "#7DD3FC"
+        private const val TEXT_PRIMARY = "#F8FAFC"
     }
+
+    private val dlnaController by lazy { DlnaController(this) }
 
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
     private var progressBar: ProgressBar? = null
+    private var topBarView: View? = null
+    private var unlockPillView: TextView? = null
+    private var btnRotate: TextView? = null
+    private var btnZoom: TextView? = null
+    private var btnLock: TextView? = null
+    private var btnCast: ImageButton? = null
+
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast IPTV"
-    private var mimeType: String = "application/x-mpegURL"
-    private var isCastingToTv: Boolean = false
     private var isScreenLocked: Boolean = false
-    private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = FILL
-    private var retryCount: Int = 0
-    private var retryJob: Job? = null
-    private val overlayButtons = mutableListOf<ImageButton>()
-    private var unlockButton: ImageButton? = null
-    private val dlnaController by lazy { DlnaController(this) }
+    private var zoomModeIndex: Int = 0
+    private var selectedDlnaDevice: DlnaDevice? = null
+
+    private val zoomModes = listOf(
+        AspectRatioFrameLayout.RESIZE_MODE_FIT to "Fit",
+        AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "Zoom",
+        AspectRatioFrameLayout.RESIZE_MODE_FILL to "Stretch"
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_player)
 
-        playerView = findViewById(R.id.playerView)
-        val pbId = resources.getIdentifier("progressBar", "id", packageName)
-        if (pbId != 0) {
-            progressBar = findViewById(pbId)
-        }
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.parseColor(BG_PLAYER)
+        window.navigationBarColor = Color.parseColor(BG_PLAYER)
+        WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
         mediaUrl = intent.getStringExtra("MEDIA_URL")?.trim()
-            .takeUnless { it.isNullOrEmpty() }
+            ?.takeIf { it.isNotEmpty() }
             ?: intent.getStringExtra(EXTRA_MEDIA_URL)?.trim().orEmpty()
 
         mediaTitle = intent.getStringExtra("MEDIA_TITLE")?.trim()
-            .takeUnless { it.isNullOrEmpty() }
+            ?.takeIf { it.isNotEmpty() }
             ?: intent.getStringExtra(EXTRA_MEDIA_TITLE)?.trim()
-                .takeUnless { it.isNullOrEmpty() }
+                ?.takeIf { it.isNotEmpty() }
             ?: "PlusCast IPTV"
 
-        if (!isSupportedNetworkStream(mediaUrl)) {
-            Toast.makeText(
-                this,
-                "Sirf direct IPTV/network stream (HTTP/HTTPS) supported hai",
-                Toast.LENGTH_LONG
-            ).show()
+        val savedName = intent.getStringExtra("DLNA_DEVICE_NAME")?.trim().orEmpty()
+        val savedCtrl = intent.getStringExtra("DLNA_CONTROL_URL")?.trim().orEmpty()
+        if (savedName.isNotEmpty() && savedCtrl.isNotEmpty()) {
+            selectedDlnaDevice = DlnaDevice(
+                friendlyName = savedName,
+                controlUrl = savedCtrl
+            )
+        } else {
+            selectedDlnaDevice = DlnaDeviceStore.getLastDevice(this)
+        }
+
+        val root = buildPlayerUi()
+        setContentView(root)
+        applySystemBarInsets(root)
+
+        syncOrientationControls(resources.configuration.orientation)
+        syncLockState()
+
+        if (mediaUrl.isEmpty()) {
+            Toast.makeText(this, "Stream URL nahi mila", Toast.LENGTH_LONG).show()
             finish()
             return
         }
 
-        mimeType = intent.getStringExtra(EXTRA_MIME_TYPE)?.trim()
-            .takeUnless { it.isNullOrEmpty() }
-            ?: detectMimeType(mediaUrl)
-
-        applyImmersiveSystemBars(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
-        addRotateButton()
-        addZoomToggleButton()
-        addDlnaButton()
-        addLockButton()
-        addUnlockButton()
-        setupControllerVisibility()
-        setupXmlCastControls()
-        initializePlayer()
-        tryCastMediaIfConnected()
-
-        val preselectedControlUrl = intent.getStringExtra("DLNA_CONTROL_URL")?.trim().orEmpty()
-        if (preselectedControlUrl.isNotEmpty()) {
-            val preselectedName = intent.getStringExtra("DLNA_DEVICE_NAME")?.trim()
-                .takeUnless { it.isNullOrEmpty() } ?: "DLNA Renderer"
-            val device = DlnaDevice(
-                friendlyName = preselectedName,
-                controlUrl = preselectedControlUrl
-            )
-            DlnaDeviceStore.saveLastDevice(this, device)
-            startDlnaPlayback(device)
-        }
+        initPlayer(mediaUrl)
     }
 
-    private fun isSupportedNetworkStream(url: String): Boolean {
-        val trimmed = url.trim()
-        if (trimmed.isEmpty()) return false
-        val lower = trimmed.lowercase(Locale.US)
-        if (!(lower.startsWith("http://") || lower.startsWith("https://"))) return false
-        if (lower.contains("youtube.com/") || lower.contains("youtu.be/")) return false
-        return true
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        syncOrientationControls(newConfig.orientation)
     }
 
-    private fun applyImmersiveSystemBars(isLandscape: Boolean) {
-        try {
-            val controller = WindowCompat.getInsetsController(window, window.decorView)
-            if (isLandscape || isScreenLocked) {
-                controller.hide(WindowInsetsCompat.Type.systemBars())
-                controller.systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            } else {
-                controller.show(WindowInsetsCompat.Type.systemBars())
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun setupControllerVisibility() {
-        playerView?.apply {
-            controllerShowTimeoutMs = 3500
-            controllerHideOnTouch = true
-            setControllerVisibilityListener(
-                PlayerView.ControllerVisibilityListener { visibility ->
-                    if (isScreenLocked) {
-                        overlayButtons.forEach { it.visibility = View.GONE }
-                        unlockButton?.visibility = View.VISIBLE
-                        return@ControllerVisibilityListener
-                    }
-                    overlayButtons.forEach { btn ->
-                        btn.visibility = if (visibility == View.VISIBLE) View.VISIBLE else View.GONE
-                    }
-                }
-            )
-        }
-    }
-
-    private fun setupXmlCastControls() {
-        val castId = resources.getIdentifier("btnCastDlna", "id", packageName)
-        val rescanId = resources.getIdentifier("btnRescanDlna", "id", packageName)
-
-        if (castId != 0) {
-            findViewById<View>(castId)?.setOnClickListener {
-                val saved = DlnaDeviceStore.getLastDevice(this)
-                if (saved != null) {
-                    startDlnaPlayback(saved)
-                } else {
-                    discoverAndShowDlnaDevices()
-                }
-            }
-        }
-
-        if (rescanId != 0) {
-            findViewById<View>(rescanId)?.setOnClickListener {
-                discoverAndShowDlnaDevices()
-            }
-        }
-    }
-
-    private fun addRotateButton() {
-        try {
-            val rootView = findViewById<ViewGroup>(android.R.id.content)
-            val rotateButton = ImageButton(this).apply {
-                setImageResource(android.R.drawable.ic_menu_rotate)
-                setColorFilter(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#99000000"))
-                contentDescription = "Rotate Screen"
-                elevation = 12f
-                val sizePx = (48 * resources.displayMetrics.density).toInt()
-                val marginPx = (16 * resources.displayMetrics.density).toInt()
-                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
-                    gravity = Gravity.TOP or Gravity.END
-                    topMargin = marginPx
-                    rightMargin = marginPx
-                }
-                setOnClickListener {
-                    toggleScreenOrientation()
-                }
-            }
-            overlayButtons.add(rotateButton)
-            rootView.addView(rotateButton)
-            rotateButton.bringToFront()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun addZoomToggleButton() {
-        try {
-            val rootView = findViewById<ViewGroup>(android.R.id.content)
-            val sizePx = (48 * resources.displayMetrics.density).toInt()
-            val marginPx = (16 * resources.displayMetrics.density).toInt()
-            val gapPx = (10 * resources.displayMetrics.density).toInt()
-
-            val zoomButton = ImageButton(this).apply {
-                setImageResource(android.R.drawable.ic_menu_crop)
-                setColorFilter(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#99000000"))
-                contentDescription = "Toggle Fill"
-                elevation = 12f
-                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
-                    gravity = Gravity.TOP or Gravity.END
-                    topMargin = marginPx + sizePx + gapPx
-                    rightMargin = marginPx
-                }
-                setOnClickListener {
-                    toggleResizeMode()
-                }
-            }
-            overlayButtons.add(zoomButton)
-            rootView.addView(zoomButton)
-            zoomButton.bringToFront()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun addDlnaButton() {
-        try {
-            val rootView = findViewById<ViewGroup>(android.R.id.content)
-            val sizePx = (48 * resources.displayMetrics.density).toInt()
-            val marginPx = (16 * resources.displayMetrics.density).toInt()
-            val gapPx = (10 * resources.displayMetrics.density).toInt()
-
-            val dlnaButton = ImageButton(this).apply {
-                setImageResource(android.R.drawable.stat_sys_data_bluetooth)
-                setColorFilter(Color.parseColor("#00E5FF"))
-                setBackgroundColor(Color.parseColor("#99000000"))
-                contentDescription = "Cast to DLNA"
-                elevation = 12f
-                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
-                    gravity = Gravity.TOP or Gravity.END
-                    topMargin = marginPx + (sizePx + gapPx) * 2
-                    rightMargin = marginPx
-                }
-                setOnClickListener {
-                    val saved = DlnaDeviceStore.getLastDevice(this@PlayerActivity)
-                    if (saved != null) {
-                        startDlnaPlayback(saved)
-                    } else {
-                        discoverAndShowDlnaDevices()
-                    }
-                }
-                setOnLongClickListener {
-                    discoverAndShowDlnaDevices()
-                    true
-                }
-            }
-            overlayButtons.add(dlnaButton)
-            rootView.addView(dlnaButton)
-            dlnaButton.bringToFront()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun addLockButton() {
-        try {
-            val rootView = findViewById<ViewGroup>(android.R.id.content)
-            val sizePx = (48 * resources.displayMetrics.density).toInt()
-            val marginPx = (16 * resources.displayMetrics.density).toInt()
-            val gapPx = (10 * resources.displayMetrics.density).toInt()
-
-            val lockButton = ImageButton(this).apply {
-                setImageResource(android.R.drawable.ic_lock_lock)
-                setColorFilter(Color.parseColor("#FACC15"))
-                setBackgroundColor(Color.parseColor("#99000000"))
-                contentDescription = "Lock Screen"
-                elevation = 12f
-                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
-                    gravity = Gravity.TOP or Gravity.END
-                    topMargin = marginPx + (sizePx + gapPx) * 3
-                    rightMargin = marginPx
-                }
-                setOnClickListener {
-                    setScreenLocked(true)
-                }
-            }
-            overlayButtons.add(lockButton)
-            rootView.addView(lockButton)
-            lockButton.bringToFront()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun addUnlockButton() {
-        try {
-            val rootView = findViewById<ViewGroup>(android.R.id.content)
-            val sizePx = (52 * resources.displayMetrics.density).toInt()
-            val marginPx = (20 * resources.displayMetrics.density).toInt()
-
-            val btn = ImageButton(this).apply {
-                setImageResource(android.R.drawable.ic_lock_idle_lock)
-                setColorFilter(Color.parseColor("#FACC15"))
-                setBackgroundColor(Color.parseColor("#CC0F172A"))
-                contentDescription = "Unlock Screen"
-                elevation = 16f
-                visibility = View.GONE
-                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
-                    gravity = Gravity.TOP or Gravity.START
-                    topMargin = marginPx
-                    leftMargin = marginPx
-                }
-                setOnClickListener {
-                    setScreenLocked(false)
-                }
-            }
-            unlockButton = btn
-            rootView.addView(btn)
-            btn.bringToFront()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun setScreenLocked(locked: Boolean) {
-        isScreenLocked = locked
-        applyImmersiveSystemBars(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
-
-        if (locked) {
-            playerView?.useController = false
-            playerView?.hideController()
-            overlayButtons.forEach { it.visibility = View.GONE }
-            unlockButton?.visibility = View.VISIBLE
-            unlockButton?.bringToFront()
-            Toast.makeText(this, "Screen Lock ON 🔐", Toast.LENGTH_SHORT).show()
+    override fun onStart() {
+        super.onStart()
+        if (player == null && mediaUrl.isNotEmpty()) {
+            initPlayer(mediaUrl)
         } else {
-            unlockButton?.visibility = View.GONE
-            playerView?.useController = true
-            playerView?.showController()
-            overlayButtons.forEach { it.visibility = View.VISIBLE }
-            Toast.makeText(this, "Screen Lock OFF 🔓", Toast.LENGTH_SHORT).show()
+            player?.playWhenReady = true
         }
     }
 
-    private fun discoverAndShowDlnaDevices() {
-        Toast.makeText(this, "DLNA devices khoj raha hai...", Toast.LENGTH_SHORT).show()
+    override fun onStop() {
+        player?.playWhenReady = false
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        releasePlayer()
+        super.onDestroy()
+    }
+
+    private fun isLandscape(orientation: Int): Boolean =
+        orientation == Configuration.ORIENTATION_LANDSCAPE
+
+    private fun toggleScreenOrientation() {
+        if (isScreenLocked) {
+            Toast.makeText(this, "Screen lock hai, pehle Unlock karein", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val currentIsLand = isLandscape(resources.configuration.orientation)
+        requestedOrientation = if (currentIsLand) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+    }
+
+    private fun syncOrientationControls(orientation: Int) {
+        val land = isLandscape(orientation)
+        btnRotate?.text = if (land) "↻ Portrait" else "↻ Landscape"
+
+        val zoomButton = btnZoom ?: return
+        if (land) {
+            zoomButton.visibility = View.VISIBLE
+            zoomButton.isEnabled = true
+            applyResizeMode()
+        } else {
+            zoomModeIndex = 0
+            zoomButton.visibility = View.GONE
+            zoomButton.isEnabled = false
+            playerView?.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+    }
+
+    private fun cycleZoomMode() {
+        if (!isLandscape(resources.configuration.orientation)) {
+            syncOrientationControls(resources.configuration.orientation)
+            return
+        }
+        zoomModeIndex = (zoomModeIndex + 1) % zoomModes.size
+        applyResizeMode()
+        val label = zoomModes[zoomModeIndex].second
+        Toast.makeText(this, "Zoom: $label", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun applyResizeMode() {
+        if (!isLandscape(resources.configuration.orientation)) {
+            playerView?.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            btnZoom?.text = "Zoom: Fit"
+            return
+        }
+        val (mode, label) = zoomModes[zoomModeIndex]
+        playerView?.resizeMode = mode
+        btnZoom?.text = "Zoom: $label"
+    }
+
+    private fun toggleScreenLock() {
+        isScreenLocked = !isScreenLocked
+        syncLockState()
+        Toast.makeText(
+            this,
+            if (isScreenLocked) "Controls lock ho gaye" else "Controls unlock ho gaye",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun syncLockState() {
+        if (isScreenLocked) {
+            topBarView?.visibility = View.GONE
+            playerView?.useController = false
+            unlockPillView?.visibility = View.VISIBLE
+        } else {
+            unlockPillView?.visibility = View.GONE
+            topBarView?.visibility = View.VISIBLE
+            playerView?.useController = true
+            syncOrientationControls(resources.configuration.orientation)
+        }
+        btnLock?.text = if (isScreenLocked) "🔓 Unlock" else "🔒 Lock"
+    }
+
+    private fun buildPlayerUi(): View {
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor(BG_PLAYER))
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val pv = PlayerView(this).apply {
+            useController = true
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            setBackgroundColor(Color.parseColor(BG_PLAYER))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        playerView = pv
+        root.addView(pv)
+
+        val spinner = ProgressBar(this).apply {
+            visibility = View.VISIBLE
+            indeterminateTintList = ColorStateList.valueOf(Color.parseColor(ACCENT_CYAN))
+            val lp = FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER)
+            layoutParams = lp
+        }
+        progressBar = spinner
+        root.addView(spinner)
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(14).toFloat()
+                setColor(Color.parseColor("#D9101826"))
+                setStroke(dp(1), Color.parseColor(BORDER_BAR))
+            }
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            val lp = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            )
+            lp.marginStart = dp(10)
+            lp.marginEnd = dp(10)
+            lp.topMargin = dp(10)
+            layoutParams = lp
+        }
+        topBarView = topBar
+
+        val btnBack = TextView(this).apply {
+            text = "←"
+            setTextColor(Color.parseColor(TEXT_PRIMARY))
+            textSize = 18f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = "transparent",
+                normalStroke = "transparent",
+                focusStroke = ACCENT_CYAN,
+                radiusDp = 10
+            )
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setOnClickListener { finish() }
+        }
+
+        val tvTitle = TextView(this).apply {
+            text = mediaTitle
+            setTextColor(Color.parseColor(TEXT_PRIMARY))
+            textSize = 13.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            lp.marginEnd = dp(6)
+            layoutParams = lp
+        }
+
+        val controlsScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val controlsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val rotateBtn = TextView(this).apply {
+            text = "↻ Landscape"
+            setTextColor(Color.parseColor(TEXT_PRIMARY))
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_BAR,
+                normalStroke = BORDER_BAR,
+                focusStroke = ACCENT_CYAN,
+                radiusDp = 999
+            )
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.marginEnd = dp(6)
+            layoutParams = lp
+            setOnClickListener { toggleScreenOrientation() }
+        }
+        btnRotate = rotateBtn
+
+        val zoomBtn = TextView(this).apply {
+            text = "Zoom: Fit"
+            setTextColor(Color.parseColor(ACCENT_GOLD))
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_BAR,
+                normalStroke = BORDER_BAR,
+                focusStroke = ACCENT_GOLD,
+                radiusDp = 999
+            )
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.marginEnd = dp(6)
+            layoutParams = lp
+            setOnClickListener { cycleZoomMode() }
+        }
+        btnZoom = zoomBtn
+
+        val lockBtn = TextView(this).apply {
+            text = "🔒 Lock"
+            setTextColor(Color.parseColor(TEXT_PRIMARY))
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_BAR,
+                normalStroke = BORDER_BAR,
+                focusStroke = ACCENT_CYAN,
+                radiusDp = 999
+            )
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.marginEnd = dp(6)
+            layoutParams = lp
+            setOnClickListener { toggleScreenLock() }
+        }
+        btnLock = lockBtn
+
+        val castBtn = ImageButton(this).apply {
+            setImageDrawable(createCastScreenIconDrawable())
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = "Cast to DLNA TV"
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_BAR,
+                normalStroke = BORDER_BAR,
+                focusStroke = ACCENT_CYAN,
+                radiusDp = 999
+            )
+            setPadding(dp(7), dp(7), dp(7), dp(7))
+            layoutParams = LinearLayout.LayoutParams(dp(34), dp(34))
+            setOnClickListener { triggerCastAction() }
+        }
+        btnCast = castBtn
+
+        controlsRow.addView(rotateBtn)
+        controlsRow.addView(zoomBtn)
+        controlsRow.addView(lockBtn)
+        controlsRow.addView(castBtn)
+        controlsScroll.addView(controlsRow)
+
+        topBar.addView(btnBack)
+        topBar.addView(tvTitle)
+        topBar.addView(controlsScroll)
+        root.addView(topBar)
+
+        val unlockPill = TextView(this).apply {
+            text = "🔓 Unlock"
+            visibility = View.GONE
+            setTextColor(Color.parseColor(ACCENT_GOLD))
+            textSize = 12.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = "#D9101826",
+                normalStroke = ACCENT_GOLD,
+                focusStroke = ACCENT_CYAN,
+                radiusDp = 999
+            )
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            val lp = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END
+            )
+            lp.topMargin = dp(12)
+            lp.marginEnd = dp(12)
+            layoutParams = lp
+            setOnClickListener { toggleScreenLock() }
+        }
+        unlockPillView = unlockPill
+        root.addView(unlockPill)
+
+        return root
+    }
+
+    private fun applySystemBarInsets(root: View) {
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
+    }
+
+    private fun initPlayer(url: String) {
+        releasePlayer()
+        val exo = ExoPlayer.Builder(this).build().apply {
+            val item = MediaItem.fromUri(Uri.parse(url))
+            setMediaItem(item)
+            prepare()
+            playWhenReady = true
+            addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    progressBar?.visibility =
+                        if (playbackState == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    progressBar?.visibility = View.GONE
+                    Toast.makeText(
+                        this@PlayerActivity,
+                        "Stream play nahi ho paya: ${error.errorCodeName}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            })
+        }
+        player = exo
+        playerView?.player = exo
+    }
+
+    private fun releasePlayer() {
+        playerView?.player = null
+        player?.release()
+        player = null
+    }
+
+    private fun triggerCastAction() {
+        val currentDevice = selectedDlnaDevice
+        if (currentDevice != null) {
+            castStreamToDevice(currentDevice)
+            return
+        }
+
+        Toast.makeText(this, "DLNA TV khoj raha hai...", Toast.LENGTH_SHORT).show()
         lifecycleScope.launch {
             val devices = dlnaController.discoverRenderers()
             if (isFinishing || isDestroyed) return@launch
@@ -375,7 +513,7 @@ class PlayerActivity : AppCompatActivity() {
             if (devices.isEmpty()) {
                 Toast.makeText(
                     this@PlayerActivity,
-                    "Koi DLNA device nahi mila. Same Wi-Fi aur DLNA mode check karein.",
+                    "Koi DLNA TV nahi mila",
                     Toast.LENGTH_LONG
                 ).show()
                 return@launch
@@ -383,293 +521,104 @@ class PlayerActivity : AppCompatActivity() {
 
             val names = devices.map { it.friendlyName }.toTypedArray()
             AlertDialog.Builder(this@PlayerActivity)
-                .setTitle("DLNA Device Chunein")
+                .setTitle("Cast TV Chunein")
                 .setItems(names) { _, which ->
-                    val selectedDevice = devices[which]
-                    DlnaDeviceStore.saveLastDevice(this@PlayerActivity, selectedDevice)
-                    startDlnaPlayback(selectedDevice)
+                    val chosen = devices[which]
+                    selectedDlnaDevice = chosen
+                    DlnaDeviceStore.saveLastDevice(this@PlayerActivity, chosen)
+                    castStreamToDevice(chosen)
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
         }
     }
 
-    private fun startDlnaPlayback(device: DlnaDevice) {
-        val resolvedMime = mimeType.ifBlank { detectMimeType(mediaUrl) }
-        Toast.makeText(this, "${device.friendlyName} par bhej raha hai...", Toast.LENGTH_SHORT).show()
-
+    private fun castStreamToDevice(device: DlnaDevice) {
+        Toast.makeText(
+            this,
+            "${device.friendlyName} par cast bhej raha hai...",
+            Toast.LENGTH_SHORT
+        ).show()
         lifecycleScope.launch {
-            val result = dlnaController.playMediaOnDevice(
+            val res = dlnaController.playMediaOnDevice(
                 device = device,
                 mediaUrl = mediaUrl,
-                title = mediaTitle,
-                mimeType = resolvedMime
+                title = mediaTitle
             )
             if (isFinishing || isDestroyed) return@launch
 
-            if (result.success) {
-                isCastingToTv = true
-                player?.pause()
-                Toast.makeText(
-                    this@PlayerActivity,
-                    "${device.friendlyName} par play ho raha hai",
-                    Toast.LENGTH_SHORT
-                ).show()
-            } else {
-                Toast.makeText(
-                    this@PlayerActivity,
-                    "DLNA fail: ${result.message} — dobara scan kar rahe hain",
-                    Toast.LENGTH_LONG
-                ).show()
-                DlnaDeviceStore.clearLastDevice(this@PlayerActivity)
-                discoverAndShowDlnaDevices()
+            Toast.makeText(
+                this@PlayerActivity,
+                if (res.success) "${device.friendlyName} par chal raha hai" else res.message,
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun createCastScreenIconDrawable(): Drawable {
+        val size = dp(24).coerceAtLeast(18)
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val f = size.toFloat()
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor(ICON_CAST_SOFT)
+            style = Paint.Style.STROKE
+            strokeWidth = (f * 0.075f).coerceAtLeast(1.6f)
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        val screenRect = RectF(f * 0.15f, f * 0.25f, f * 0.85f, f * 0.71f)
+        canvas.drawRoundRect(screenRect, f * 0.08f, f * 0.08f, paint)
+
+        canvas.drawLine(f * 0.37f, f * 0.81f, f * 0.63f, f * 0.81f, paint)
+
+        val arc1 = RectF(f * 0.15f, f * 0.45f, f * 0.43f, f * 0.73f)
+        val arc2 = RectF(f * 0.15f, f * 0.55f, f * 0.33f, f * 0.73f)
+        canvas.drawArc(arc1, -90f, 90f, false, paint)
+        canvas.drawArc(arc2, -90f, 90f, false, paint)
+
+        val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor(ICON_CAST_SOFT)
+            style = Paint.Style.FILL
+        }
+        val dotPath = Path().apply {
+            addCircle(f * 0.22f, f * 0.65f, (f * 0.05f).coerceAtLeast(1.3f), Path.Direction.CW)
+        }
+        canvas.drawPath(dotPath, dotPaint)
+
+        return BitmapDrawable(resources, bmp)
+    }
+
+    private fun createFocusPillDrawable(
+        normalFill: String,
+        normalStroke: String,
+        focusStroke: String,
+        radiusDp: Int
+    ): StateListDrawable {
+        val normal = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(radiusDp).toFloat()
+            if (normalFill != "transparent") {
+                setColor(Color.parseColor(normalFill))
+            }
+            if (normalStroke != "transparent") {
+                setStroke(dp(1), Color.parseColor(normalStroke))
             }
         }
-    }
-
-    private fun detectMimeType(url: String): String {
-        return when {
-            url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
-            url.endsWith(".ts", ignoreCase = true) || url.contains(".ts?", ignoreCase = true) -> "video/mp2t"
-            url.contains(".mp4", ignoreCase = true) -> "video/mp4"
-            url.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
-            url.contains(".webm", ignoreCase = true) -> "video/webm"
-            url.contains(".mp3", ignoreCase = true) -> "audio/mpeg"
-            else -> "application/x-mpegURL"
+        val focused = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(radiusDp).toFloat()
+            setColor(Color.parseColor(BG_BADGE))
+            setStroke(dp(2), Color.parseColor(focusStroke))
+        }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), focused)
+            addState(intArrayOf(), normal)
         }
     }
 
-    private fun toggleResizeMode() {
-        val pv = playerView ?: return
-        if (resizeModeIndex == 0) {
-            resizeModeIndex = 1
-            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
-            Toast.makeText(this, "Fill Mode (Kam crop)", Toast.LENGTH_SHORT).show()
-        } else {
-            resizeModeIndex = 0
-            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-            Toast.makeText(this, "Fit Mode (Bina crop)", Toast.LENGTH_SHORT).show()
-        }
-        pv.requestLayout()
-    }
-
-    private fun toggleScreenOrientation() {
-        val currentOrientation = resources.configuration.orientation
-        requestedOrientation = if (currentOrientation == Configuration.ORIENTATION_LANDSCAPE) {
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-        } else {
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        }
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        applyImmersiveSystemBars(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
-        playerView?.resizeMode = if (resizeModeIndex == 1) {
-            AspectRatioFrameLayout.RESIZE_MODE_FILL
-        } else {
-            AspectRatioFrameLayout.RESIZE_MODE_FIT
-        }
-        playerView?.requestLayout()
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (isScreenLocked) {
-            Toast.makeText(this, "Screen lock hai, pehle unlock karein", Toast.LENGTH_SHORT).show()
-            return
-        }
-        @Suppress("DEPRECATION")
-        super.onBackPressed()
-    }
-
-    override fun onStart() {
-        super.onStart()
-        if (player == null && isSupportedNetworkStream(mediaUrl)) {
-            initializePlayer()
-        } else if (!isCastingToTv) {
-            player?.playWhenReady = true
-        }
-    }
-
-    @OptIn(UnstableApi::class)
-    private fun initializePlayer() {
-        try {
-            releasePlayer()
-
-            val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-                .setUserAgent("PlusCast/1.0 (IPTV)")
-                .setConnectTimeoutMs(15_000)
-                .setReadTimeoutMs(25_000)
-                .setAllowCrossProtocolRedirects(true)
-
-            val mediaSourceFactory = DefaultMediaSourceFactory(this)
-                .setDataSourceFactory(httpDataSourceFactory)
-
-            val loadControl: LoadControl = DefaultLoadControl.Builder()
-                .setBufferDurationsMs(
-                    /* minBufferMs = */ 20_000,
-                    /* maxBufferMs = */ 50_000,
-                    /* bufferForPlaybackMs = */ 2_500,
-                    /* bufferForPlaybackAfterRebufferMs = */ 5_000
-                )
-                .setPrioritizeTimeOverSizeThresholds(true)
-                .build()
-
-            val audioAttributes = AudioAttributes.Builder()
-                .setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                .build()
-
-            val renderersFactory = DefaultRenderersFactory(this)
-                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-
-            val exoPlayer = ExoPlayer.Builder(this, renderersFactory)
-                .setMediaSourceFactory(mediaSourceFactory)
-                .setLoadControl(loadControl)
-                .setAudioAttributes(audioAttributes, true)
-                .setHandleAudioBecomingNoisy(true)
-                .build()
-
-            player = exoPlayer
-            playerView?.player = exoPlayer
-            playerView?.resizeMode = if (resizeModeIndex == 1) {
-                AspectRatioFrameLayout.RESIZE_MODE_FILL
-            } else {
-                AspectRatioFrameLayout.RESIZE_MODE_FIT
-            }
-
-            exoPlayer.addListener(object : Player.Listener {
-                override fun onPlaybackStateChanged(playbackState: Int) {
-                    when (playbackState) {
-                        Player.STATE_BUFFERING -> {
-                            progressBar?.visibility = View.VISIBLE
-                        }
-                        Player.STATE_READY -> {
-                            retryCount = 0
-                            progressBar?.visibility = View.GONE
-                        }
-                        Player.STATE_ENDED, Player.STATE_IDLE -> {
-                            progressBar?.visibility = View.GONE
-                        }
-                    }
-                }
-
-                override fun onTracksChanged(tracks: Tracks) {
-                    val hasAudioTrack = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
-                    if (!hasAudioTrack) {
-                        Toast.makeText(
-                            this@PlayerActivity,
-                            "Is channel mein audio track nahi mila",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-
-                override fun onPlayerError(error: PlaybackException) {
-                    progressBar?.visibility = View.GONE
-                    if (retryCount < 3) {
-                        retryCount++
-                        val waitMs = retryCount * 1500L
-                        Toast.makeText(
-                            this@PlayerActivity,
-                            "Stream reconnect kar raha hai ($retryCount/3)...",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        retryJob?.cancel()
-                        retryJob = lifecycleScope.launch {
-                            delay(waitMs)
-                            if (!isFinishing && !isDestroyed && !isCastingToTv) {
-                                player?.prepare()
-                                player?.playWhenReady = true
-                            }
-                        }
-                    } else {
-                        Toast.makeText(
-                            this@PlayerActivity,
-                            "Error (${error.errorCodeName}): ${error.message}",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                }
-            })
-
-            val mediaItem = MediaItem.fromUri(Uri.parse(mediaUrl))
-            exoPlayer.setMediaItem(mediaItem)
-            exoPlayer.prepare()
-            exoPlayer.playWhenReady = !isCastingToTv
-        } catch (e: Exception) {
-            e.printStackTrace()
-            Toast.makeText(this, "Player error: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun tryCastMediaIfConnected() {
-        try {
-            val castSession = CastContext.getSharedInstance(this).sessionManager.currentCastSession
-            val remoteMediaClient = castSession?.remoteMediaClient ?: return
-
-            val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
-                putString(MediaMetadata.KEY_TITLE, mediaTitle)
-            }
-
-            val isHls = mediaUrl.contains(".m3u8", ignoreCase = true)
-            val castMimeType = when {
-                isHls -> "application/x-mpegURL"
-                mediaUrl.contains(".mp4", ignoreCase = true) -> "video/mp4"
-                mediaUrl.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
-                mediaUrl.contains(".mp3", ignoreCase = true) -> "audio/mpeg"
-                else -> "video/*"
-            }
-
-            val streamType = if (isHls) {
-                MediaInfo.STREAM_TYPE_LIVE
-            } else {
-                MediaInfo.STREAM_TYPE_BUFFERED
-            }
-
-            val mediaInfo = MediaInfo.Builder(mediaUrl)
-                .setStreamType(streamType)
-                .setContentType(castMimeType)
-                .setMetadata(metadata)
-                .build()
-
-            val loadRequest = MediaLoadRequestData.Builder()
-                .setMediaInfo(mediaInfo)
-                .setAutoplay(true)
-                .build()
-
-            remoteMediaClient.load(loadRequest)
-            isCastingToTv = true
-            player?.pause()
-            Toast.makeText(this, "TV par cast ho raha hai...", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun releasePlayer() {
-        retryJob?.cancel()
-        retryJob = null
-        progressBar?.visibility = View.GONE
-        try {
-            playerView?.player = null
-            player?.release()
-            player = null
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        isCastingToTv = false
-        isScreenLocked = false
-        releasePlayer()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        releasePlayer()
-    }
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
 }
