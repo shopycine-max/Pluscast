@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -23,7 +24,6 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.decoder.ffmpeg.FfmpegLibrary
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -42,7 +42,8 @@ class PlayerActivity : AppCompatActivity() {
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast Media"
     private var isCastingToTv: Boolean = false
-    private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = ZOOM
+    private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = FILL
+    private val overlayButtons = mutableListOf<ImageButton>()
     private val dlnaController by lazy { DlnaController(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,6 +64,7 @@ class PlayerActivity : AppCompatActivity() {
         addRotateButton()
         addZoomToggleButton()
         addDlnaButton()
+        setupControllerVisibility()
         tryCastMediaIfConnected()
 
         val preselectedControlUrl = intent.getStringExtra("DLNA_CONTROL_URL").orEmpty()
@@ -92,6 +94,20 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupControllerVisibility() {
+        playerView?.apply {
+            controllerShowTimeoutMs = 3500
+            controllerHideOnTouch = true
+            setControllerVisibilityListener(
+                PlayerView.ControllerVisibilityListener { visibility ->
+                    overlayButtons.forEach { btn ->
+                        btn.visibility = if (visibility == View.VISIBLE) View.VISIBLE else View.GONE
+                    }
+                }
+            )
+        }
+    }
+
     private fun addRotateButton() {
         try {
             val rootView = findViewById<ViewGroup>(android.R.id.content)
@@ -112,6 +128,7 @@ class PlayerActivity : AppCompatActivity() {
                     toggleScreenOrientation()
                 }
             }
+            overlayButtons.add(rotateButton)
             rootView.addView(rotateButton)
             rotateButton.bringToFront()
         } catch (e: Exception) {
@@ -130,7 +147,7 @@ class PlayerActivity : AppCompatActivity() {
                 setImageResource(android.R.drawable.ic_menu_crop)
                 setColorFilter(Color.WHITE)
                 setBackgroundColor(Color.parseColor("#99000000"))
-                contentDescription = "Toggle Zoom"
+                contentDescription = "Toggle Fill"
                 elevation = 12f
                 layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
                     gravity = Gravity.TOP or Gravity.END
@@ -141,6 +158,7 @@ class PlayerActivity : AppCompatActivity() {
                     toggleResizeMode()
                 }
             }
+            overlayButtons.add(zoomButton)
             rootView.addView(zoomButton)
             zoomButton.bringToFront()
         } catch (e: Exception) {
@@ -170,6 +188,7 @@ class PlayerActivity : AppCompatActivity() {
                     discoverAndShowDlnaDevices()
                 }
             }
+            overlayButtons.add(dlnaButton)
             rootView.addView(dlnaButton)
             dlnaButton.bringToFront()
         } catch (e: Exception) {
@@ -250,8 +269,8 @@ class PlayerActivity : AppCompatActivity() {
         val pv = playerView ?: return
         if (resizeModeIndex == 0) {
             resizeModeIndex = 1
-            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-            Toast.makeText(this, "Zoom Mode (Full screen)", Toast.LENGTH_SHORT).show()
+            pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+            Toast.makeText(this, "Fill Mode (Kam crop)", Toast.LENGTH_SHORT).show()
         } else {
             resizeModeIndex = 0
             pv.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -273,7 +292,7 @@ class PlayerActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         applyImmersiveSystemBars(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
         playerView?.resizeMode = if (resizeModeIndex == 1) {
-            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            AspectRatioFrameLayout.RESIZE_MODE_FILL
         } else {
             AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
@@ -313,41 +332,19 @@ class PlayerActivity : AppCompatActivity() {
             player = exoPlayer
             playerView?.player = exoPlayer
             playerView?.resizeMode = if (resizeModeIndex == 1) {
-                AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                AspectRatioFrameLayout.RESIZE_MODE_FILL
             } else {
                 AspectRatioFrameLayout.RESIZE_MODE_FIT
             }
 
             exoPlayer.addListener(object : Player.Listener {
                 override fun onTracksChanged(tracks: Tracks) {
-                    var hasSupportedAudio = false
-                    val audioMimeTypes = mutableListOf<String>()
-
-                    for (group in tracks.groups) {
-                        if (group.type == C.TRACK_TYPE_AUDIO) {
-                            for (i in 0 until group.length) {
-                                val format = group.getTrackFormat(i)
-                                format.sampleMimeType?.let { audioMimeTypes.add(it) }
-                                if (group.isTrackSelected(i) && group.isTrackSupported(i)) {
-                                    hasSupportedAudio = true
-                                }
-                            }
-                        }
-                    }
-
-                    if (audioMimeTypes.isEmpty()) {
+                    val hasAudioTrack = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
+                    if (!hasAudioTrack) {
                         Toast.makeText(
                             this@PlayerActivity,
                             "Is channel mein audio track nahi mila",
                             Toast.LENGTH_SHORT
-                        ).show()
-                    } else if (!hasSupportedAudio) {
-                        val ffmpegReady = FfmpegLibrary.isAvailable()
-                        val codecsText = audioMimeTypes.distinct().joinToString()
-                        Toast.makeText(
-                            this@PlayerActivity,
-                            "FFmpeg available: $ffmpegReady | Codec: $codecsText",
-                            Toast.LENGTH_LONG
                         ).show()
                     }
                 }
