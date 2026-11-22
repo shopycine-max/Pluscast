@@ -42,7 +42,7 @@ jobs:
 
           cd "$JNI_DIR"
           for abi in arm64-v8a armeabi-v7a; do
-            ./build_ffmpeg.sh "$MODULE_DIR" "$NDK_DIR" "linux-x86_64" "$abi"
+            ANDROID_ABI="$abi" ./build_ffmpeg.sh "$MODULE_DIR" "$NDK_DIR" "linux-x86_64" "24"
           done
 
           cd "$GITHUB_WORKSPACE/media3"
