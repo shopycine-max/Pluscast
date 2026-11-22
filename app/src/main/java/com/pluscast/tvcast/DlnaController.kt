@@ -41,12 +41,19 @@ object DlnaDeviceStore {
     private const val KEY_SERVICE_TYPE = "last_service_type"
 
     fun saveLastDevice(context: Context, device: DlnaDevice) {
+        val safeName = device.friendlyName.trim()
+        val safeControlUrl = device.controlUrl.trim()
+        if (safeName.isEmpty() || !isValidHttpUrl(safeControlUrl)) return
+
         context.applicationContext
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_NAME, device.friendlyName)
-            .putString(KEY_CONTROL_URL, device.controlUrl)
-            .putString(KEY_SERVICE_TYPE, device.serviceType)
+            .putString(KEY_NAME, safeName)
+            .putString(KEY_CONTROL_URL, safeControlUrl)
+            .putString(
+                KEY_SERVICE_TYPE,
+                device.serviceType.trim().ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
+            )
             .apply()
     }
 
@@ -55,7 +62,7 @@ object DlnaDeviceStore {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val name = prefs.getString(KEY_NAME, null)?.trim().orEmpty()
         val controlUrl = prefs.getString(KEY_CONTROL_URL, null)?.trim().orEmpty()
-        if (name.isEmpty() || controlUrl.isEmpty()) return null
+        if (name.isEmpty() || !isValidHttpUrl(controlUrl)) return null
 
         val serviceType = prefs.getString(KEY_SERVICE_TYPE, null)?.trim()
             .takeUnless { it.isNullOrEmpty() }
@@ -75,6 +82,11 @@ object DlnaDeviceStore {
             .clear()
             .apply()
     }
+
+    private fun isValidHttpUrl(url: String): Boolean {
+        return url.startsWith("http://", ignoreCase = true) ||
+            url.startsWith("https://", ignoreCase = true)
+    }
 }
 
 class DlnaController(private val context: Context? = null) {
@@ -82,6 +94,8 @@ class DlnaController(private val context: Context? = null) {
     companion object {
         private const val TAG = "PlusCastDlna"
         private const val USER_AGENT = "PlusCast/1.0 (UPnP/1.0; Android)"
+        private const val SSDP_GROUP = "239.255.255.250"
+        private const val SSDP_PORT = 1900
     }
 
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
@@ -110,16 +124,16 @@ class DlnaController(private val context: Context? = null) {
             }
 
             val searchTargets = listOf(
-                "ssdp:all",
-                "upnp:rootdevice",
                 "urn:schemas-upnp-org:device:MediaRenderer:1",
                 "urn:schemas-upnp-org:service:AVTransport:1",
-                "urn:schemas-upnp-org:service:AVTransport:2"
+                "urn:schemas-upnp-org:service:AVTransport:2",
+                "upnp:rootdevice"
             )
 
             var unicastSocket: DatagramSocket? = null
             var multicastSocket: MulticastSocket? = null
-            val group = InetAddress.getByName("239.255.255.250")
+            var joinedMulticast = false
+            val group = InetAddress.getByName(SSDP_GROUP)
 
             try {
                 unicastSocket = if (localWifiIp != null) {
@@ -127,11 +141,10 @@ class DlnaController(private val context: Context? = null) {
                 } else {
                     DatagramSocket()
                 }.apply {
-                    broadcast = true
                     soTimeout = 500
                 }
 
-                multicastSocket = MulticastSocket(1900).apply {
+                multicastSocket = MulticastSocket(SSDP_PORT).apply {
                     reuseAddress = true
                     soTimeout = 500
                     try {
@@ -142,36 +155,43 @@ class DlnaController(private val context: Context? = null) {
                     }
                     try {
                         if (networkInterface != null) {
-                            joinGroup(InetSocketAddress(group, 1900), networkInterface)
+                            joinGroup(InetSocketAddress(group, SSDP_PORT), networkInterface)
+                            joinedMulticast = true
                         } else {
                             @Suppress("DEPRECATION")
                             joinGroup(group)
+                            joinedMulticast = true
                         }
                     } catch (_: Exception) {
+                        joinedMulticast = false
                     }
                 }
 
                 for (st in searchTargets) {
                     val query = buildString {
                         append("M-SEARCH * HTTP/1.1\r\n")
-                        append("HOST: 239.255.255.250:1900\r\n")
+                        append("HOST: $SSDP_GROUP:$SSDP_PORT\r\n")
                         append("MAN: \"ssdp:discover\"\r\n")
                         append("MX: 3\r\n")
                         append("ST: $st\r\n\r\n")
                     }.toByteArray(Charsets.UTF_8)
 
-                    val packet = DatagramPacket(query, query.size, group, 1900)
+                    val packet = DatagramPacket(query, query.size, group, SSDP_PORT)
                     try {
-                        unicastSocket.send(packet)
+                        if (joinedMulticast) {
+                            multicastSocket.send(packet)
+                        } else {
+                            unicastSocket.send(packet)
+                        }
                     } catch (_: Exception) {
-                    }
-                    try {
-                        multicastSocket.send(packet)
-                    } catch (_: Exception) {
+                        try {
+                            unicastSocket.send(packet)
+                        } catch (_: Exception) {
+                        }
                     }
                 }
 
-                val deadline = System.currentTimeMillis() + timeoutMs
+                val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(1000, 15000)
                 val buffer = ByteArray(4096)
 
                 while (System.currentTimeMillis() < deadline) {
@@ -180,7 +200,7 @@ class DlnaController(private val context: Context? = null) {
                             val respPacket = DatagramPacket(buffer, buffer.size)
                             sock.receive(respPacket)
                             val text = String(respPacket.data, 0, respPacket.length, Charsets.UTF_8)
-                            extractHeader(text, "LOCATION")?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                            extractHeader(text, "LOCATION")?.trim()?.takeIf { isValidHttpUrl(it) }?.let {
                                 locations.add(it)
                                 Log.d(TAG, "SSDP LOCATION: $it")
                             }
@@ -194,11 +214,13 @@ class DlnaController(private val context: Context? = null) {
                 Log.e(TAG, "SSDP scan error", e)
             } finally {
                 try {
-                    if (networkInterface != null) {
-                        multicastSocket?.leaveGroup(InetSocketAddress(group, 1900), networkInterface)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        multicastSocket?.leaveGroup(group)
+                    if (joinedMulticast) {
+                        if (networkInterface != null) {
+                            multicastSocket?.leaveGroup(InetSocketAddress(group, SSDP_PORT), networkInterface)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            multicastSocket?.leaveGroup(group)
+                        }
                     }
                 } catch (_: Exception) {
                 }
@@ -218,8 +240,8 @@ class DlnaController(private val context: Context? = null) {
 
             for (loc in locations) {
                 val parsed = parseDeviceDescription(loc) ?: continue
-                if (parsed.controlUrl.isNotBlank()) {
-                    found["${parsed.friendlyName}|${parsed.controlUrl}"] = parsed
+                if (parsed.controlUrl.isNotBlank() && isValidHttpUrl(parsed.controlUrl)) {
+                    found["${parsed.friendlyName.lowercase(Locale.US)}|${parsed.controlUrl}"] = parsed
                 }
             }
 
@@ -232,23 +254,24 @@ class DlnaController(private val context: Context? = null) {
         title: String = "PlusCast IPTV",
         mimeType: String = "application/x-mpegURL"
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
-        if (device.controlUrl.isBlank()) {
-            return@withContext DlnaPlayResult(false, "Control URL missing")
+        val controlUrl = device.controlUrl.trim()
+        if (controlUrl.isBlank() || !isValidHttpUrl(controlUrl)) {
+            return@withContext DlnaPlayResult(false, "Invalid or missing Control URL")
         }
 
         val cleanUrl = mediaUrl.trim()
-        if (cleanUrl.isEmpty() ||
-            !(cleanUrl.startsWith("http://", ignoreCase = true) ||
-                cleanUrl.startsWith("https://", ignoreCase = true))
-        ) {
+        if (cleanUrl.isEmpty() || !isValidHttpUrl(cleanUrl)) {
             return@withContext DlnaPlayResult(false, "Sirf HTTP/HTTPS stream URL supported hai")
         }
 
-        if (cleanUrl.contains("://127.0.0.1") || cleanUrl.contains("://localhost")) {
-            return@withContext DlnaPlayResult(false, "Loopback URL not reachable by TV")
+        if (isLoopbackOrLocalhost(cleanUrl)) {
+            return@withContext DlnaPlayResult(false, "Loopback URL TV se reachable nahi hai")
         }
 
-        val serviceUrn = device.serviceType.ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
+        val serviceUrn = device.serviceType.trim().ifBlank {
+            "urn:schemas-upnp-org:service:AVTransport:1"
+        }
+        val safeTitle = title.trim().ifEmpty { "PlusCast IPTV" }
         val resolvedMime = resolveMimeType(cleanUrl, mimeType)
 
         val stopSoap = """
@@ -262,16 +285,15 @@ class DlnaController(private val context: Context? = null) {
             </s:Envelope>
         """.trimIndent()
         sendSoapAction(
-            controlUrl = device.controlUrl,
+            controlUrl = controlUrl,
             soapAction = "\"$serviceUrn#Stop\"",
             body = stopSoap
         )
 
         val escapedUrl = escapeXml(cleanUrl)
-        val escapedTitle = escapeXml(title)
+        val escapedTitle = escapeXml(safeTitle)
         val escapedMime = escapeXml(resolvedMime)
-        val dlnaFlags = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
-        val protocolInfo = "http-get:*:$escapedMime:$dlnaFlags"
+        val protocolInfo = "http-get:*:$escapedMime:*"
 
         val rawDidl =
             """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
@@ -290,14 +312,14 @@ class DlnaController(private val context: Context? = null) {
         """.trimIndent()
 
         var setUriRes = sendSoapAction(
-            controlUrl = device.controlUrl,
+            controlUrl = controlUrl,
             soapAction = "\"$serviceUrn#SetAVTransportURI\"",
             body = buildSetUriSoap(rawDidl)
         )
 
         if (!setUriRes.success) {
             setUriRes = sendSoapAction(
-                controlUrl = device.controlUrl,
+                controlUrl = controlUrl,
                 soapAction = "\"$serviceUrn#SetAVTransportURI\"",
                 body = buildSetUriSoap("")
             )
@@ -322,7 +344,7 @@ class DlnaController(private val context: Context? = null) {
         """.trimIndent()
 
         val playRes = sendSoapAction(
-            controlUrl = device.controlUrl,
+            controlUrl = controlUrl,
             soapAction = "\"$serviceUrn#Play\"",
             body = playSoap
         )
@@ -332,6 +354,19 @@ class DlnaController(private val context: Context? = null) {
         }
 
         DlnaPlayResult(true, "Playing")
+    }
+
+    private fun isValidHttpUrl(url: String): Boolean {
+        return url.startsWith("http://", ignoreCase = true) ||
+            url.startsWith("https://", ignoreCase = true)
+    }
+
+    private fun isLoopbackOrLocalhost(url: String): Boolean {
+        val lower = url.lowercase(Locale.US)
+        return lower.contains("://127.0.0.1") ||
+            lower.contains("://localhost") ||
+            lower.contains("://0.0.0.0") ||
+            lower.contains("://[::1]")
     }
 
     private fun resolveMimeType(url: String, fallbackMime: String): String {
@@ -385,6 +420,7 @@ class DlnaController(private val context: Context? = null) {
                 connectTimeout = 3000
                 readTimeout = 3000
                 requestMethod = "GET"
+                instanceFollowRedirects = true
                 setRequestProperty("User-Agent", USER_AGENT)
             }
             if (conn.responseCode !in 200..299) return null
@@ -401,6 +437,7 @@ class DlnaController(private val context: Context? = null) {
             } else {
                 ""
             }
+            if (!isValidHttpUrl(resolvedControlUrl)) return null
 
             DlnaDevice(
                 friendlyName = friendlyName,
@@ -430,7 +467,7 @@ class DlnaController(private val context: Context? = null) {
                 }
             }
         }
-        return null to extractTagValue(xml, "controlURL")?.trim()
+        return null to null
     }
 
     private fun sendSoapAction(controlUrl: String, soapAction: String, body: String): DlnaPlayResult {
@@ -442,6 +479,7 @@ class DlnaController(private val context: Context? = null) {
                 readTimeout = 5000
                 requestMethod = "POST"
                 doOutput = true
+                instanceFollowRedirects = false
                 setRequestProperty("User-Agent", USER_AGENT)
                 setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
                 setRequestProperty("SOAPAction", soapAction)
