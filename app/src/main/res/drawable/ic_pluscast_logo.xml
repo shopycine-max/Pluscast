@@ -20,7 +20,6 @@
         android:fillColor="#1E293B"
         android:strokeColor="#E2E8F0"
         android:strokeWidth="3.5"
-        android:strokeJoin="round"
         android:pathData="M26,33h56a4,4 0,0 1,4 4v32a4,4 0,0 1,-4 4H26a4,4 0,0 1,-4 -4V37a4,4 0,0 1,4 -4z" />
 
     <!-- TV Stand Base -->
