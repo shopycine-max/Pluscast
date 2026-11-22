@@ -1,0 +1,53 @@
+name: Build Media3 1.4.1 FFmpeg AAR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Pluscast repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          ndk-version: '26.1.10909125'
+
+      - name: Install build tools (cmake, ninja, ffmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build ffmpeg pkg-config yasm nasm curl
+
+      - name: Clone Media3 1.4.1
+        run: |
+          git clone --depth 1 --branch 1.4.1 https://github.com/androidx/media.git media3
+
+      - name: Build FFmpeg native libs and decoder AAR
+        env:
+          NDK_PATH: $ANDROID_NDK_ROOT
+          FFMPEG_PATH: $HOME/ffmpeg
+        run: |
+          git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_PATH"
+          cd media3/libraries/decoder_ffmpeg/src/main/jni
+
+          ENABLED_DECODERS="mp2 mp2float mp3 ac3 eac3 aac aac_latm dca vorbis opus flac alac"
+          for abi in arm64-v8a armeabi-v7a; do
+            ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_PATH" "$abi" --enable-decoder=mp2 --enable-decoder=mp2float --enable-decoder=mp3 --enable-decoder=ac3 --enable-decoder=eac3 --enable-decoder=dca
+          done
+
+          cd "$GITHUB_WORKSPACE/media3"
+          ./gradlew :libraries:decoder_ffmpeg:bundleReleaseAar
+
+      - name: Upload AAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: media3-1.4.1-ffmpeg-aar
+          path: media3/libraries/decoder_ffmpeg/build/outputs/aar/*.aar
