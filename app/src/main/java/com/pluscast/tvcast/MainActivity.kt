@@ -753,12 +753,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createLogoDrawable(): Drawable {
-        val size = dp(44).coerceAtLeast(28)
+        val size = dp(48).coerceAtLeast(32)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
         val f = size.toFloat()
-        val inset = f * 0.06f
+        val inset = f * 0.08f
         val bgRect = RectF(inset, inset, f - inset, f - inset)
         val corner = f * 0.24f
 
@@ -776,15 +776,23 @@ class MainActivity : AppCompatActivity() {
         }
         canvas.drawRoundRect(bgRect, corner, corner, bgPaint)
 
+        // Subtle border around icon container
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = (f * 0.025f).coerceAtLeast(1.2f)
+            color = Color.parseColor("#1E3A5F")
+        }
+        canvas.drawRoundRect(bgRect, corner, corner, borderPaint)
+
         // Broadcast TV bezel
-        val bezelRect = RectF(f * 0.17f, f * 0.24f, f * 0.83f, f * 0.72f)
+        val bezelRect = RectF(f * 0.20f, f * 0.26f, f * 0.80f, f * 0.70f)
         val bezelFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             color = Color.parseColor("#0B1322")
         }
         val bezelStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = (f * 0.042f).coerceAtLeast(1.8f)
+            strokeWidth = (f * 0.040f).coerceAtLeast(1.6f)
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
             color = Color.parseColor(ACCENT_CYAN)
@@ -792,25 +800,25 @@ class MainActivity : AppCompatActivity() {
         canvas.drawRoundRect(bezelRect, f * 0.07f, f * 0.07f, bezelFill)
         canvas.drawRoundRect(bezelRect, f * 0.07f, f * 0.07f, bezelStroke)
 
-        // Clean live signal arcs on top-left inside bezel
+        // Live signal arcs inside bezel
         val wavePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = (f * 0.032f).coerceAtLeast(1.3f)
+            strokeWidth = (f * 0.030f).coerceAtLeast(1.2f)
             strokeCap = Paint.Cap.ROUND
             color = Color.parseColor(ACCENT_SKY)
         }
-        canvas.drawArc(RectF(f * 0.25f, f * 0.38f, f * 0.36f, f * 0.49f), -75f, 75f, false, wavePaint)
-        canvas.drawArc(RectF(f * 0.25f, f * 0.31f, f * 0.43f, f * 0.49f), -75f, 75f, false, wavePaint)
+        canvas.drawArc(RectF(f * 0.27f, f * 0.39f, f * 0.37f, f * 0.49f), -75f, 75f, false, wavePaint)
+        canvas.drawArc(RectF(f * 0.27f, f * 0.32f, f * 0.43f, f * 0.49f), -75f, 75f, false, wavePaint)
 
-        // Sharp broadcast play mark
+        // Broadcast play triangle
         val playPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             color = Color.parseColor(ACCENT_CYAN)
         }
         val playPath = Path().apply {
-            moveTo(f * 0.44f, f * 0.37f)
+            moveTo(f * 0.45f, f * 0.38f)
             lineTo(f * 0.65f, f * 0.48f)
-            lineTo(f * 0.44f, f * 0.59f)
+            lineTo(f * 0.45f, f * 0.58f)
             close()
         }
         canvas.drawPath(playPath, playPaint)
@@ -820,17 +828,17 @@ class MainActivity : AppCompatActivity() {
             style = Paint.Style.FILL
             color = Color.parseColor(ACCENT_GOLD)
         }
-        canvas.drawCircle(f * 0.72f, f * 0.32f, (f * 0.042f).coerceAtLeast(1.5f), liveDotPaint)
+        canvas.drawCircle(f * 0.71f, f * 0.33f, (f * 0.038f).coerceAtLeast(1.4f), liveDotPaint)
 
         // Broadcast stand base
         val standPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = (f * 0.040f).coerceAtLeast(1.6f)
+            strokeWidth = (f * 0.038f).coerceAtLeast(1.5f)
             strokeCap = Paint.Cap.ROUND
             color = Color.parseColor(ACCENT_CYAN)
         }
-        canvas.drawLine(f * 0.50f, f * 0.72f, f * 0.50f, f * 0.80f, standPaint)
-        canvas.drawLine(f * 0.39f, f * 0.80f, f * 0.61f, f * 0.80f, standPaint)
+        canvas.drawLine(f * 0.50f, f * 0.70f, f * 0.50f, f * 0.78f, standPaint)
+        canvas.drawLine(f * 0.40f, f * 0.78f, f * 0.60f, f * 0.78f, standPaint)
 
         return BitmapDrawable(resources, bitmap)
     }
