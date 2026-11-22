@@ -1,6 +1,7 @@
 package com.pluscast.tvcast
 
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -14,6 +15,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Bundle
 import android.text.Editable
 import android.text.InputType
@@ -55,6 +57,9 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "pluscast_iptv_prefs"
         private const val KEY_PLAYLIST_URL = "last_playlist_url"
         private const val KEY_LAST_REFRESH_MS = "last_playlist_refresh_ms"
+        private const val KEY_FAVORITES = "favorite_channel_urls"
+        private const val KEY_LAST_URL = "last_watched_url"
+        private const val KEY_LAST_TITLE = "last_watched_title"
 
         // Daily auto-refresh interval (24 hours)
         private const val DAILY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
@@ -63,7 +68,7 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_PLAYLIST_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
 
         // Allowed filter chips
-        private val FILTER_TABS = listOf("All", "Hindi", "Bhojpuri", "Bengali News")
+        private val FILTER_TABS = listOf("All", "Favorites", "Hindi", "Bhojpuri", "Bengali News")
 
         // Dark Broadcast / TV Palette
         private const val BG_PRIMARY = "#070B12"
@@ -83,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private val dlnaController by lazy { DlnaController(this) }
 
     private var tvDlnaStatus: TextView? = null
+    private var tvLastWatched: TextView? = null
     private var tvChannelCount: TextView? = null
     private var etSearch: EditText? = null
     private var btnRefresh: TextView? = null
@@ -91,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     private var recyclerView: RecyclerView? = null
 
     private var allChannels: List<IptvChannel> = emptyList()
+    private var favoriteUrls: MutableSet<String> = mutableSetOf()
     private var selectedGroup: String = "All"
     private var channelAdapter: ChannelCardAdapter? = null
 
@@ -105,11 +112,14 @@ class MainActivity : AppCompatActivity() {
         window.navigationBarColor = Color.parseColor(BG_PRIMARY)
         WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
+        favoriteUrls = loadFavorites()
+
         val rootView = buildProfessionalUi()
         setContentView(rootView)
         applySystemBarInsets(rootView)
 
         updateDlnaStatusBadge()
+        updateLastWatchedPill()
         rebuildGroupChips()
         setupListeners()
 
@@ -125,6 +135,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updateDlnaStatusBadge()
+        updateLastWatchedPill()
 
         val activeUrl = resolveHiddenPlaylistUrl()
         if (activeUrl.isNotEmpty() && !isLoadingPlaylist) {
@@ -145,7 +156,7 @@ class MainActivity : AppCompatActivity() {
         dailyTickerJob?.cancel()
         dailyTickerJob = lifecycleScope.launch {
             while (isActive) {
-                delay(60 * 60 * 1000L) // Check every hour while app stays open
+                delay(60 * 60 * 1000L)
                 val activeUrl = resolveHiddenPlaylistUrl()
                 if (activeUrl.isNotEmpty() && !isLoadingPlaylist && isDailyRefreshDue()) {
                     loadPlaylist(activeUrl, force = true, showToast = false)
@@ -233,17 +244,9 @@ class MainActivity : AppCompatActivity() {
             letterSpacing = 0.04f
         }
 
-        val dlnaBadge = TextView(this).apply {
-            text = "DLNA: Scan"
-            setTextColor(Color.parseColor(ACCENT_CYAN))
-            textSize = 11.5f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            background = createPillDrawable(
-                fillHex = BG_BADGE,
-                strokeHex = "#1E4966",
-                radiusDp = 999
-            )
-            setPadding(dp(10), dp(4), dp(10), dp(4))
+        val badgesRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             val lp = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -251,16 +254,63 @@ class MainActivity : AppCompatActivity() {
             lp.topMargin = dp(6)
             layoutParams = lp
         }
+
+        val dlnaBadge = TextView(this).apply {
+            text = "DLNA: Scan"
+            setTextColor(Color.parseColor(ACCENT_CYAN))
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_BADGE,
+                normalStroke = "#1E4966",
+                focusStroke = ACCENT_CYAN,
+                radiusDp = 999
+            )
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+        }
         tvDlnaStatus = dlnaBadge
+
+        val lastWatchedBadge = TextView(this).apply {
+            visibility = View.GONE
+            setTextColor(Color.parseColor(ACCENT_GOLD))
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_SURFACE,
+                normalStroke = "#5B4613",
+                focusStroke = ACCENT_GOLD,
+                radiusDp = 999
+            )
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.marginStart = dp(8)
+            layoutParams = lp
+        }
+        tvLastWatched = lastWatchedBadge
+
+        badgesRow.addView(dlnaBadge)
+        badgesRow.addView(lastWatchedBadge)
 
         val refreshBtn = TextView(this).apply {
             text = "↻ Refresh"
             setTextColor(Color.parseColor(TEXT_PRIMARY))
             textSize = 13f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            background = createPillDrawable(
-                fillHex = BG_SURFACE,
-                strokeHex = BORDER_SUBTLE,
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_SURFACE,
+                normalStroke = BORDER_SUBTLE,
+                focusStroke = ACCENT_CYAN,
                 radiusDp = 12
             )
             setPadding(dp(14), dp(10), dp(14), dp(10))
@@ -268,7 +318,7 @@ class MainActivity : AppCompatActivity() {
         btnRefresh = refreshBtn
 
         brandBlock.addView(tvTitle)
-        brandBlock.addView(dlnaBadge)
+        brandBlock.addView(badgesRow)
         headerRow.addView(logoView)
         headerRow.addView(brandBlock)
         headerRow.addView(refreshBtn)
@@ -281,9 +331,10 @@ class MainActivity : AppCompatActivity() {
             textSize = 14f
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT
-            background = createPillDrawable(
-                fillHex = BG_SURFACE,
-                strokeHex = BORDER_SUBTLE,
+            background = createFocusPillDrawable(
+                normalFill = BG_SURFACE,
+                normalStroke = BORDER_SUBTLE,
+                focusStroke = ACCENT_CYAN,
                 radiusDp = 14
             )
             setPadding(dp(14), dp(12), dp(14), dp(12))
@@ -327,9 +378,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         val countView = TextView(this).apply {
-            text = "Channels: 0"
+            text = "Channels: 0 • Long-press to Pin"
             setTextColor(Color.parseColor(TEXT_SECONDARY))
-            textSize = 12.5f
+            textSize = 12f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -337,7 +388,7 @@ class MainActivity : AppCompatActivity() {
 
         val spinner = ProgressBar(this).apply {
             visibility = View.GONE
-            indeterminateTintList = android.content.res.ColorStateList.valueOf(Color.parseColor(ACCENT_CYAN))
+            indeterminateTintList = ColorStateList.valueOf(Color.parseColor(ACCENT_CYAN))
             layoutParams = LinearLayout.LayoutParams(dp(22), dp(22))
         }
         progressBar = spinner
@@ -350,7 +401,9 @@ class MainActivity : AppCompatActivity() {
         val adapter = ChannelCardAdapter(
             lifecycleScope = lifecycleScope,
             fallbackDrawable = fallbackLogo,
-            onClick = { channel -> openChannelInPlayer(channel) }
+            isFavorite = { ch -> favoriteUrls.contains(ch.url) },
+            onClick = { channel -> openChannelInPlayer(channel) },
+            onLongClick = { channel -> toggleFavorite(channel) }
         )
         channelAdapter = adapter
 
@@ -385,6 +438,18 @@ class MainActivity : AppCompatActivity() {
             discoverAndPickDlnaDevice()
         }
 
+        tvLastWatched?.setOnClickListener {
+            val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            val lastUrl = prefs.getString(KEY_LAST_URL, null)?.trim().orEmpty()
+            val lastTitle = prefs.getString(KEY_LAST_TITLE, null)?.trim().orEmpty()
+            if (lastUrl.isNotEmpty()) {
+                launchPlayer(
+                    url = lastUrl,
+                    title = lastTitle.ifEmpty { "PlusCast IPTV" }
+                )
+            }
+        }
+
         etSearch?.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -392,6 +457,52 @@ class MainActivity : AppCompatActivity() {
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
+    }
+
+    private fun updateLastWatchedPill() {
+        val lastTitle = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(KEY_LAST_TITLE, null)?.trim().orEmpty()
+        val lastUrl = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(KEY_LAST_URL, null)?.trim().orEmpty()
+
+        if (lastUrl.isNotEmpty() && lastTitle.isNotEmpty()) {
+            tvLastWatched?.visibility = View.VISIBLE
+            tvLastWatched?.text = "▶ $lastTitle"
+        } else {
+            tvLastWatched?.visibility = View.GONE
+        }
+    }
+
+    private fun toggleFavorite(channel: IptvChannel) {
+        val added = if (favoriteUrls.contains(channel.url)) {
+            favoriteUrls.remove(channel.url)
+            false
+        } else {
+            favoriteUrls.add(channel.url)
+            true
+        }
+        saveFavorites(favoriteUrls)
+        applyFilters()
+        Toast.makeText(
+            this,
+            if (added) "${channel.name} Favorites mein pin ho gaya"
+            else "${channel.name} Favorites se hat gaya",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun loadFavorites(): MutableSet<String> {
+        val saved = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getStringSet(KEY_FAVORITES, emptySet())
+            .orEmpty()
+        return saved.toMutableSet()
+    }
+
+    private fun saveFavorites(set: Set<String>) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putStringSet(KEY_FAVORITES, set.toSet())
+            .apply()
     }
 
     private fun updateDlnaStatusBadge() {
@@ -459,7 +570,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
-            val fetched = M3uPlaylistParser.fetchChannels(url)
+            val fetched = M3uPlaylistParser.fetchChannels(url, applicationContext)
             if (isFinishing || isDestroyed) return@launch
 
             isLoadingPlaylist = false
@@ -493,7 +604,7 @@ class MainActivity : AppCompatActivity() {
             } else if (showToast) {
                 Toast.makeText(
                     this@MainActivity,
-                    "Nayi list nahi mili, purani list dikha rahe hain",
+                    "Nayi list nahi mili, cached list dikha rahe hain",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -507,16 +618,19 @@ class MainActivity : AppCompatActivity() {
         for (groupName in FILTER_TABS) {
             val isSelected = selectedGroup.equals(groupName, ignoreCase = true)
             val chip = TextView(this).apply {
-                text = groupName
+                text = if (groupName == "Favorites") "★ Favorites" else groupName
                 textSize = 12f
                 typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+                isFocusable = true
+                isClickable = true
                 setTextColor(
                     if (isSelected) Color.parseColor(BG_PRIMARY)
                     else Color.parseColor(TEXT_PRIMARY)
                 )
-                background = createPillDrawable(
-                    fillHex = if (isSelected) ACCENT_CYAN else BG_SURFACE,
-                    strokeHex = if (isSelected) ACCENT_CYAN else BORDER_SUBTLE,
+                background = createFocusPillDrawable(
+                    normalFill = if (isSelected) ACCENT_CYAN else BG_SURFACE,
+                    normalStroke = if (isSelected) ACCENT_CYAN else BORDER_SUBTLE,
+                    focusStroke = ACCENT_GOLD,
                     radiusDp = 999
                 )
                 setPadding(dp(12), dp(7), dp(12), dp(7))
@@ -539,27 +653,42 @@ class MainActivity : AppCompatActivity() {
     private fun applyFilters() {
         val q = etSearch?.text?.toString()?.trim()?.lowercase(Locale.US).orEmpty()
 
-        val filtered = allChannels.filter { ch ->
-            val category = M3uPlaylistParser.resolveCategory(ch) ?: return@filter false
-            val groupMatch = selectedGroup.equals("All", ignoreCase = true) ||
-                category.equals(selectedGroup, ignoreCase = true)
-            val queryMatch = q.isEmpty() ||
-                ch.name.lowercase(Locale.US).contains(q) ||
-                category.lowercase(Locale.US).contains(q) ||
-                ch.group.lowercase(Locale.US).contains(q)
-            groupMatch && queryMatch
-        }
+        val filtered = allChannels
+            .filter { ch ->
+                val category = M3uPlaylistParser.resolveCategory(ch) ?: return@filter false
+                val groupMatch = when {
+                    selectedGroup.equals("All", ignoreCase = true) -> true
+                    selectedGroup.equals("Favorites", ignoreCase = true) -> favoriteUrls.contains(ch.url)
+                    else -> category.equals(selectedGroup, ignoreCase = true)
+                }
+                val queryMatch = q.isEmpty() ||
+                    ch.name.lowercase(Locale.US).contains(q) ||
+                    category.lowercase(Locale.US).contains(q) ||
+                    ch.group.lowercase(Locale.US).contains(q)
+                groupMatch && queryMatch
+            }
+            .sortedByDescending { favoriteUrls.contains(it.url) }
 
         channelAdapter?.submitList(filtered)
-        tvChannelCount?.text = "Showing ${filtered.size} of ${allChannels.size} channels"
+        tvChannelCount?.text = "Showing ${filtered.size} of ${allChannels.size} • Long-press = Pin"
     }
 
     private fun openChannelInPlayer(channel: IptvChannel) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LAST_URL, channel.url)
+            .putString(KEY_LAST_TITLE, channel.name)
+            .apply()
+        updateLastWatchedPill()
+        launchPlayer(channel.url, channel.name)
+    }
+
+    private fun launchPlayer(url: String, title: String) {
         val intent = Intent(this, PlayerActivity::class.java).apply {
-            putExtra("MEDIA_URL", channel.url)
-            putExtra("MEDIA_TITLE", channel.name)
-            putExtra(PlayerActivity.EXTRA_MEDIA_URL, channel.url)
-            putExtra(PlayerActivity.EXTRA_MEDIA_TITLE, channel.name)
+            putExtra("MEDIA_URL", url)
+            putExtra("MEDIA_TITLE", title)
+            putExtra(PlayerActivity.EXTRA_MEDIA_URL, url)
+            putExtra(PlayerActivity.EXTRA_MEDIA_TITLE, title)
 
             val savedDevice = DlnaDeviceStore.getLastDevice(this@MainActivity)
             if (savedDevice != null) {
@@ -651,19 +780,36 @@ class MainActivity : AppCompatActivity() {
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density).toInt()
 
-    private fun createPillDrawable(fillHex: String, strokeHex: String, radiusDp: Int): GradientDrawable {
-        return GradientDrawable().apply {
+    private fun createFocusPillDrawable(
+        normalFill: String,
+        normalStroke: String,
+        focusStroke: String,
+        radiusDp: Int
+    ): StateListDrawable {
+        val normal = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(radiusDp).toFloat()
-            setColor(Color.parseColor(fillHex))
-            setStroke(dp(1), Color.parseColor(strokeHex))
+            setColor(Color.parseColor(normalFill))
+            setStroke(dp(1), Color.parseColor(normalStroke))
+        }
+        val focused = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(radiusDp).toFloat()
+            setColor(Color.parseColor(BG_BADGE))
+            setStroke(dp(2), Color.parseColor(focusStroke))
+        }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), focused)
+            addState(intArrayOf(), normal)
         }
     }
 
     private class ChannelCardAdapter(
         private val lifecycleScope: LifecycleCoroutineScope,
         private val fallbackDrawable: Drawable,
-        private val onClick: (IptvChannel) -> Unit
+        private val isFavorite: (IptvChannel) -> Boolean,
+        private val onClick: (IptvChannel) -> Unit,
+        private val onLongClick: (IptvChannel) -> Unit
     ) : RecyclerView.Adapter<ChannelCardAdapter.ChannelViewHolder>() {
 
         private var items: List<IptvChannel> = emptyList()
@@ -682,15 +828,29 @@ class MainActivity : AppCompatActivity() {
             val density = ctx.resources.displayMetrics.density
             fun d(v: Int): Int = (v * density).toInt()
 
+            val normalBg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = d(14).toFloat()
+                setColor(Color.parseColor(BG_CARD))
+                setStroke(d(1), Color.parseColor(BORDER_CARD))
+            }
+            val focusBg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = d(14).toFloat()
+                setColor(Color.parseColor(BG_BADGE))
+                setStroke(d(2), Color.parseColor(ACCENT_CYAN))
+            }
+            val selector = StateListDrawable().apply {
+                addState(intArrayOf(android.R.attr.state_focused), focusBg)
+                addState(intArrayOf(), normalBg)
+            }
+
             val card = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.RECTANGLE
-                    cornerRadius = d(14).toFloat()
-                    setColor(Color.parseColor(BG_CARD))
-                    setStroke(d(1), Color.parseColor(BORDER_CARD))
-                }
+                isFocusable = true
+                isClickable = true
+                background = selector
                 setPadding(d(12), d(12), d(12), d(12))
                 val lp = RecyclerView.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -774,7 +934,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onBindViewHolder(holder: ChannelViewHolder, position: Int) {
             val item = items[position]
-            holder.bind(item, lifecycleScope, fallbackDrawable, logoCache, onClick)
+            holder.bind(item, isFavorite(item), lifecycleScope, fallbackDrawable, logoCache, onClick, onLongClick)
         }
 
         override fun onViewRecycled(holder: ChannelViewHolder) {
@@ -800,20 +960,26 @@ class MainActivity : AppCompatActivity() {
 
             fun bind(
                 channel: IptvChannel,
+                fav: Boolean,
                 scope: LifecycleCoroutineScope,
                 fallbackDrawable: Drawable,
                 logoCache: LruCache<String, Bitmap>,
-                onClick: (IptvChannel) -> Unit
+                onClick: (IptvChannel) -> Unit,
+                onLongClick: (IptvChannel) -> Unit
             ) {
                 cancelLogoLoad()
                 val categoryLabel = M3uPlaylistParser.resolveCategory(channel) ?: channel.group
-                titleTv.text = channel.name
+                titleTv.text = if (fav) "★ ${channel.name}" else channel.name
                 groupTv.text = if (channel.group.isNotBlank() && !channel.group.equals("All", true)) {
                     "$categoryLabel • ${channel.group}"
                 } else {
                     categoryLabel
                 }
                 itemView.setOnClickListener { onClick(channel) }
+                itemView.setOnLongClickListener {
+                    onLongClick(channel)
+                    true
+                }
 
                 val logoUrl = channel.logoUrl.trim()
                 logoIv.tag = logoUrl
