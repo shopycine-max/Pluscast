@@ -22,6 +22,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 class YouTubeActivity : AppCompatActivity() {
 
@@ -161,7 +163,16 @@ class YouTubeActivity : AppCompatActivity() {
                     rightMargin = marginPx
                 }
                 setOnClickListener {
-                    castCurrentUrlToDlna()
+                    val savedDevice = DlnaDeviceStore.getLastDevice(this@YouTubeActivity)
+                    if (savedDevice != null) {
+                        sendCurrentPageOrVideoToDlna(savedDevice, allowRescanOnFail = true)
+                    } else {
+                        scanAndShowDlnaPicker()
+                    }
+                }
+                setOnLongClickListener {
+                    scanAndShowDlnaPicker()
+                    true
                 }
             }
             rootView.addView(castBtn)
@@ -171,7 +182,7 @@ class YouTubeActivity : AppCompatActivity() {
         }
     }
 
-    private fun castCurrentUrlToDlna() {
+    private fun scanAndShowDlnaPicker() {
         val currentUrl = webView?.url.orEmpty()
         if (currentUrl.isBlank()) {
             Toast.makeText(this, "Koi URL load nahi hai", Toast.LENGTH_SHORT).show()
@@ -197,25 +208,83 @@ class YouTubeActivity : AppCompatActivity() {
                 .setTitle("DLNA Device Chunein")
                 .setItems(names) { _, which ->
                     val selected = devices[which]
-                    val title = webView?.title?.takeIf { it.isNotBlank() } ?: "YouTube Cast"
-                    lifecycleScope.launch {
-                        val res = dlnaController.playMediaOnDevice(
-                            device = selected,
-                            mediaUrl = currentUrl,
-                            title = title,
-                            mimeType = "video/mp4"
-                        )
-                        if (isFinishing || isDestroyed) return@launch
-                        Toast.makeText(
-                            this@YouTubeActivity,
-                            if (res.success) "${selected.friendlyName} par bheja gaya (YouTube web URL STB par play na ho to direct stream chahiye)"
-                            else "DLNA fail: ${res.message}",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
+                    DlnaDeviceStore.saveLastDevice(this@YouTubeActivity, selected)
+                    sendCurrentPageOrVideoToDlna(selected, allowRescanOnFail = false)
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
+        }
+    }
+
+    private fun sendCurrentPageOrVideoToDlna(device: DlnaDevice, allowRescanOnFail: Boolean) {
+        val currentUrl = webView?.url.orEmpty()
+        if (currentUrl.isBlank()) {
+            Toast.makeText(this, "Koi URL load nahi hai", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val title = webView?.title?.takeIf { it.isNotBlank() } ?: "YouTube Cast"
+        lifecycleScope.launch {
+            val directVideoUrl = extractDirectVideoSrc()
+            val targetUrl = directVideoUrl?.takeIf {
+                it.startsWith("http://") || it.startsWith("https://")
+            } ?: currentUrl
+
+            val res = dlnaController.playMediaOnDevice(
+                device = device,
+                mediaUrl = targetUrl,
+                title = title,
+                mimeType = "video/mp4"
+            )
+            if (isFinishing || isDestroyed) return@launch
+
+            if (res.success) {
+                val extraInfo = if (directVideoUrl == null && currentUrl.contains("youtube.com", true)) {
+                    " (Note: YouTube watch URL STB par direct play na ho to direct stream/IPTV use karein)"
+                } else {
+                    ""
+                }
+                Toast.makeText(
+                    this@YouTubeActivity,
+                    "${device.friendlyName} par bheja gaya$extraInfo",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                Toast.makeText(
+                    this@YouTubeActivity,
+                    "DLNA fail: ${res.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+                if (allowRescanOnFail) {
+                    DlnaDeviceStore.clearLastDevice(this@YouTubeActivity)
+                    scanAndShowDlnaPicker()
+                }
+            }
+        }
+    }
+
+    private suspend fun extractDirectVideoSrc(): String? {
+        val wv = webView ?: return null
+        return suspendCoroutine { cont ->
+            val js = """
+                (function() {
+                    var v = document.querySelector('video');
+                    if (!v) return '';
+                    return v.currentSrc || v.src || '';
+                })();
+            """.trimIndent()
+            try {
+                wv.evaluateJavascript(js) { raw ->
+                    val cleaned = raw?.trim()?.removeSurrounding("\"")?.trim().orEmpty()
+                    if (cleaned.isEmpty() || cleaned == "null" || cleaned.startsWith("blob:")) {
+                        cont.resume(null)
+                    } else {
+                        cont.resume(cleaned)
+                    }
+                }
+            } catch (_: Exception) {
+                cont.resume(null)
+            }
         }
     }
 
@@ -258,6 +327,7 @@ class YouTubeActivity : AppCompatActivity() {
                 (webView?.webChromeClient as? WebChromeClient)?.onHideCustomView()
             }
             webView?.apply {
+                loadUrl("about:blank")
                 stopLoading()
                 webChromeClient = null
                 destroy()
