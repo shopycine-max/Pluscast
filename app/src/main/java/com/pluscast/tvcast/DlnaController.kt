@@ -1,14 +1,18 @@
 package com.pluscast.tvcast
 
+import android.content.Context
+import android.net.wifi.WifiManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.HttpURLConnection
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.MulticastSocket
+import java.net.NetworkInterface
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.Locale
@@ -18,28 +22,56 @@ data class DlnaDevice(
     val controlUrl: String
 )
 
-class DlnaController {
+class DlnaController(private val context: Context? = null) {
 
-    suspend fun discoverRenderers(timeoutMs: Int = 3000): List<DlnaDevice> =
+    suspend fun discoverRenderers(timeoutMs: Int = 3500): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
             val foundByControlUrl = linkedMapOf<String, DlnaDevice>()
             val locations = linkedSetOf<String>()
 
-            val ssdpQuery = buildString {
-                append("M-SEARCH * HTTP/1.1\r\n")
-                append("HOST: 239.255.255.250:1900\r\n")
-                append("MAN: \"ssdp:discover\"\r\n")
-                append("MX: 2\r\n")
-                append("ST: urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n")
-            }.toByteArray(Charsets.UTF_8)
+            val appContext = context?.applicationContext
+            val wifiManager = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val multicastLock = try {
+                wifiManager?.createMulticastLock("PlusCastDlnaLock")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            } catch (_: Exception) {
+                null
+            }
+
+            val searchTargets = listOf(
+                "urn:schemas-upnp-org:service:AVTransport:1",
+                "upnp:rootdevice"
+            )
 
             var socket: MulticastSocket? = null
             try {
-                socket = MulticastSocket()
-                socket.soTimeout = 700
+                socket = MulticastSocket(null).apply {
+                    reuseAddress = true
+                    soTimeout = 700
+                    bind(InetSocketAddress(0))
+                    getLocalWifiIpv4()?.let { localIp ->
+                        try {
+                            setInterface(localIp)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+
                 val group = InetAddress.getByName("239.255.255.250")
-                val sendPacket = DatagramPacket(ssdpQuery, ssdpQuery.size, group, 1900)
-                socket.send(sendPacket)
+                for (st in searchTargets) {
+                    val ssdpQuery = buildString {
+                        append("M-SEARCH * HTTP/1.1\r\n")
+                        append("HOST: 239.255.255.250:1900\r\n")
+                        append("MAN: \"ssdp:discover\"\r\n")
+                        append("MX: 2\r\n")
+                        append("ST: $st\r\n\r\n")
+                    }.toByteArray(Charsets.UTF_8)
+
+                    val sendPacket = DatagramPacket(ssdpQuery, ssdpQuery.size, group, 1900)
+                    socket.send(sendPacket)
+                }
 
                 val endTime = System.currentTimeMillis() + timeoutMs
                 val buf = ByteArray(2048)
@@ -66,6 +98,12 @@ class DlnaController {
                     socket?.close()
                 } catch (_: Exception) {
                 }
+                try {
+                    if (multicastLock?.isHeld == true) {
+                        multicastLock.release()
+                    }
+                } catch (_: Exception) {
+                }
             }
 
             for (loc in locations) {
@@ -86,11 +124,12 @@ class DlnaController {
     ): Boolean = withContext(Dispatchers.IO) {
         val escapedUrl = escapeXml(mediaUrl)
         val escapedTitle = escapeXml(title)
-        val protocolInfo = "http-get:*:$mimeType:*"
+        val escapedMime = escapeXml(mimeType)
+        val protocolInfo = "http-get:*:$escapedMime:*"
 
-        val didlMetadata = escapeXml(
-            """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
-        )
+        // Single XML escape for CurrentURIMetaData (avoid double-escaping inner entities)
+        val rawDidl = """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
+        val didlMetadata = escapeXml(rawDidl)
 
         val setUriSoap = """
             <?xml version="1.0" encoding="utf-8"?>
@@ -131,13 +170,31 @@ class DlnaController {
         )
     }
 
+    private fun getLocalWifiIpv4(): InetAddress? {
+        return try {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            for (intf in interfaces) {
+                if (!intf.isUp || intf.isLoopback || intf.isVirtual) continue
+                val addrs = intf.inetAddresses
+                for (addr in addrs) {
+                    if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                        return addr
+                    }
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun parseDeviceDescription(locationUrl: String): DlnaDevice? {
         var conn: HttpURLConnection? = null
         return try {
             val url = URL(locationUrl)
             conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 2000
-                readTimeout = 2000
+                connectTimeout = 2500
+                readTimeout = 2500
                 requestMethod = "GET"
             }
             if (conn.responseCode !in 200..299) return null
