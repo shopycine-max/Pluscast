@@ -90,9 +90,6 @@ class DlnaController(private val context: Context? = null) {
             val locations = linkedSetOf<String>()
 
             val appContext = context?.applicationContext
-            if (appContext != null) {
-                LocalMediaServer.init(appContext)
-            }
             val wifiManager = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             val multicastLock = try {
                 wifiManager?.createMulticastLock("PlusCastDlnaLock")?.apply {
@@ -232,36 +229,28 @@ class DlnaController(private val context: Context? = null) {
     suspend fun playMediaOnDevice(
         device: DlnaDevice,
         mediaUrl: String,
-        title: String = "PlusCast Media",
-        mimeType: String = "video/mp4"
+        title: String = "PlusCast IPTV",
+        mimeType: String = "application/x-mpegURL"
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         if (device.controlUrl.isBlank()) {
             return@withContext DlnaPlayResult(false, "Control URL missing")
         }
 
-        val appContext = context?.applicationContext
-        if (appContext != null) {
-            LocalMediaServer.init(appContext)
+        val cleanUrl = mediaUrl.trim()
+        if (cleanUrl.isEmpty() ||
+            !(cleanUrl.startsWith("http://", ignoreCase = true) ||
+                cleanUrl.startsWith("https://", ignoreCase = true))
+        ) {
+            return@withContext DlnaPlayResult(false, "Sirf HTTP/HTTPS stream URL supported hai")
         }
 
-        val effectiveUrl = if (isLocalSource(mediaUrl)) {
-            if (appContext == null) {
-                return@withContext DlnaPlayResult(false, "Context missing for local media")
-            }
-            LocalMediaServer.registerAndGetUrl(appContext, mediaUrl, mimeType)
-                ?: return@withContext DlnaPlayResult(false, "Local Wi-Fi IP / server start fail")
-        } else {
-            mediaUrl
-        }
-
-        if (effectiveUrl.contains("://127.0.0.1") || effectiveUrl.contains("://localhost")) {
+        if (cleanUrl.contains("://127.0.0.1") || cleanUrl.contains("://localhost")) {
             return@withContext DlnaPlayResult(false, "Loopback URL not reachable by TV")
         }
 
         val serviceUrn = device.serviceType.ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
-        val resolvedMime = resolveMimeType(effectiveUrl, mimeType)
+        val resolvedMime = resolveMimeType(cleanUrl, mimeType)
 
-        // Best-effort Stop before setting a new URI so previous IPTV/media session closes cleanly
         val stopSoap = """
             <?xml version="1.0" encoding="utf-8"?>
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
@@ -278,7 +267,7 @@ class DlnaController(private val context: Context? = null) {
             body = stopSoap
         )
 
-        val escapedUrl = escapeXml(effectiveUrl)
+        val escapedUrl = escapeXml(cleanUrl)
         val escapedTitle = escapeXml(title)
         val escapedMime = escapeXml(resolvedMime)
         val dlnaFlags = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
@@ -345,15 +334,6 @@ class DlnaController(private val context: Context? = null) {
         DlnaPlayResult(true, "Playing")
     }
 
-    private fun isLocalSource(url: String): Boolean {
-        val lower = url.trim().lowercase(Locale.US)
-        return lower.startsWith("content://") ||
-            lower.startsWith("file://") ||
-            lower.startsWith("/storage/") ||
-            lower.startsWith("/sdcard/") ||
-            lower.startsWith("/mnt/")
-    }
-
     private fun resolveMimeType(url: String, fallbackMime: String): String {
         val lower = url.lowercase(Locale.US)
         return when {
@@ -363,7 +343,7 @@ class DlnaController(private val context: Context? = null) {
             lower.contains(".mkv") -> "video/x-matroska"
             lower.contains(".webm") -> "video/webm"
             lower.contains(".mp3") -> "audio/mpeg"
-            else -> fallbackMime.ifBlank { "video/mp4" }
+            else -> fallbackMime.ifBlank { "application/x-mpegURL" }
         }
     }
 
