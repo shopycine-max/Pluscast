@@ -33,6 +33,50 @@ data class DlnaPlayResult(
     val message: String
 )
 
+object DlnaDeviceStore {
+
+    private const val PREFS_NAME = "pluscast_dlna_prefs"
+    private const val KEY_NAME = "last_friendly_name"
+    private const val KEY_CONTROL_URL = "last_control_url"
+    private const val KEY_SERVICE_TYPE = "last_service_type"
+
+    fun saveLastDevice(context: Context, device: DlnaDevice) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_NAME, device.friendlyName)
+            .putString(KEY_CONTROL_URL, device.controlUrl)
+            .putString(KEY_SERVICE_TYPE, device.serviceType)
+            .apply()
+    }
+
+    fun getLastDevice(context: Context): DlnaDevice? {
+        val prefs = context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val name = prefs.getString(KEY_NAME, null)?.trim().orEmpty()
+        val controlUrl = prefs.getString(KEY_CONTROL_URL, null)?.trim().orEmpty()
+        if (name.isEmpty() || controlUrl.isEmpty()) return null
+
+        val serviceType = prefs.getString(KEY_SERVICE_TYPE, null)?.trim()
+            .takeUnless { it.isNullOrEmpty() }
+            ?: "urn:schemas-upnp-org:service:AVTransport:1"
+
+        return DlnaDevice(
+            friendlyName = name,
+            controlUrl = controlUrl,
+            serviceType = serviceType
+        )
+    }
+
+    fun clearLastDevice(context: Context) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .apply()
+    }
+}
+
 class DlnaController(private val context: Context? = null) {
 
     companion object {
