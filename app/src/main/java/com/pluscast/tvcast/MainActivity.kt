@@ -2,6 +2,7 @@ package com.pluscast.tvcast
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -15,6 +16,7 @@ import android.os.Bundle
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.LruCache
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -27,13 +29,19 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
@@ -42,8 +50,11 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "pluscast_iptv_prefs"
         private const val KEY_PLAYLIST_URL = "last_playlist_url"
 
-        // Apna M3U playlist link yahan rakhein (UI mein hide rahega)
-        private const val DEFAULT_PLAYLIST_URL = ""
+        // Minimum gap between automatic resume refreshes (5 minutes)
+        private const val AUTO_REFRESH_COOLDOWN_MS = 5 * 60 * 1000L
+
+        // India IPTV M3U playlist link (UI mein kahin nahi dikhega)
+        private const val DEFAULT_PLAYLIST_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
 
         // Dark TV / IPTV palette
         private const val BG_PRIMARY = "#090D16"
@@ -70,6 +81,10 @@ class MainActivity : AppCompatActivity() {
     private var selectedGroup: String = "All"
     private var channelAdapter: ChannelCardAdapter? = null
 
+    private var isLoadingPlaylist: Boolean = false
+    private var lastPlaylistFetchAtMs: Long = 0L
+    private var hasCompletedInitialLoad: Boolean = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -78,26 +93,51 @@ class MainActivity : AppCompatActivity() {
         window.navigationBarColor = Color.parseColor(BG_PRIMARY)
         WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
-        setContentView(buildProfessionalUi())
+        val rootView = buildProfessionalUi()
+        setContentView(rootView)
+        applySystemBarInsets(rootView)
+
         updateDlnaStatusBadge()
         setupListeners()
 
         val activeUrl = resolveHiddenPlaylistUrl()
         if (activeUrl.isNotEmpty()) {
-            loadPlaylist(activeUrl)
+            loadPlaylist(activeUrl, showToast = true)
         } else {
             tvChannelCount?.text = "Playlist link configure karein"
-            Toast.makeText(
-                this,
-                "DEFAULT_PLAYLIST_URL set nahi hai",
-                Toast.LENGTH_LONG
-            ).show()
         }
     }
 
     override fun onResume() {
         super.onResume()
         updateDlnaStatusBadge()
+
+        if (!hasCompletedInitialLoad) return
+        val activeUrl = resolveHiddenPlaylistUrl()
+        if (activeUrl.isEmpty() || isLoadingPlaylist) return
+
+        val elapsed = System.currentTimeMillis() - lastPlaylistFetchAtMs
+        if (allChannels.isEmpty() || elapsed >= AUTO_REFRESH_COOLDOWN_MS) {
+            loadPlaylist(activeUrl, showToast = false)
+        }
+    }
+
+    private fun applySystemBarInsets(root: View) {
+        val baseSide = dp(16)
+        val baseTop = dp(24)
+        val baseBottom = dp(12)
+
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(
+                baseSide + bars.left,
+                maxOf(baseTop, bars.top + dp(12)),
+                baseSide + bars.right,
+                maxOf(baseBottom, bars.bottom + dp(8))
+            )
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
     }
 
     private fun buildProfessionalUi(): View {
@@ -108,7 +148,7 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            setPadding(dp(16), dp(24), dp(16), dp(12))
+            setPadding(dp(16), dp(36), dp(16), dp(12))
         }
 
         val headerRow = LinearLayout(this).apply {
@@ -136,9 +176,9 @@ class MainActivity : AppCompatActivity() {
         val tvTitle = TextView(this).apply {
             text = "PLUSCAST IPTV"
             setTextColor(Color.parseColor(TEXT_PRIMARY))
-            textSize = 20f
+            textSize = 19f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            letterSpacing = 0.04f
+            letterSpacing = 0.03f
         }
 
         val dlnaBadge = TextView(this).apply {
@@ -254,9 +294,11 @@ class MainActivity : AppCompatActivity() {
         metaRow.addView(spinner)
         root.addView(metaRow)
 
-        val adapter = ChannelCardAdapter { channel ->
-            openChannelInPlayer(channel)
-        }
+        val fallbackLogo = createLogoDrawable()
+        val adapter = ChannelCardAdapter(
+            fallbackDrawable = fallbackLogo,
+            onClick = { channel -> openChannelInPlayer(channel) }
+        )
         channelAdapter = adapter
 
         val rv = RecyclerView(this).apply {
@@ -280,7 +322,7 @@ class MainActivity : AppCompatActivity() {
         btnRefresh?.setOnClickListener {
             val url = resolveHiddenPlaylistUrl()
             if (url.isNotEmpty()) {
-                loadPlaylist(url)
+                loadPlaylist(url, showToast = true)
             } else {
                 Toast.makeText(this, "DEFAULT_PLAYLIST_URL set nahi hai", Toast.LENGTH_SHORT).show()
             }
@@ -344,42 +386,59 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resolveHiddenPlaylistUrl(): String {
-        val saved = getSavedPlaylistUrl()
-        if (saved.isNotEmpty()) return saved
         val defaultUrl = DEFAULT_PLAYLIST_URL.trim()
         if (defaultUrl.isNotEmpty()) {
             savePlaylistUrl(defaultUrl)
+            return defaultUrl
         }
-        return defaultUrl
+        return getSavedPlaylistUrl()
     }
 
-    private fun loadPlaylist(url: String) {
+    private fun loadPlaylist(url: String, showToast: Boolean) {
+        if (isLoadingPlaylist) return
+        isLoadingPlaylist = true
+        lastPlaylistFetchAtMs = System.currentTimeMillis()
+
         progressBar?.visibility = View.VISIBLE
         btnRefresh?.isEnabled = false
-        tvChannelCount?.text = "Channels load ho rahe hain..."
+        if (allChannels.isEmpty()) {
+            tvChannelCount?.text = "Channels load ho rahe hain..."
+        }
 
         lifecycleScope.launch {
             val fetched = M3uPlaylistParser.fetchChannels(url)
             if (isFinishing || isDestroyed) return@launch
 
+            isLoadingPlaylist = false
+            hasCompletedInitialLoad = true
             progressBar?.visibility = View.GONE
             btnRefresh?.isEnabled = true
 
-            allChannels = fetched
-            selectedGroup = "All"
-            rebuildGroupChips(fetched)
-            applyFilters()
-
-            if (fetched.isEmpty()) {
+            if (fetched.isNotEmpty()) {
+                allChannels = fetched
+                selectedGroup = "All"
+                rebuildGroupChips(fetched)
+                applyFilters()
+                if (showToast) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "${fetched.size} channels ready",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } else if (allChannels.isEmpty()) {
+                tvChannelCount?.text = "Channels load nahi ho paye"
+                if (showToast) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Channels load nahi ho paye",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } else if (showToast) {
                 Toast.makeText(
                     this@MainActivity,
-                    "Channels load nahi ho paye",
-                    Toast.LENGTH_LONG
-                ).show()
-            } else {
-                Toast.makeText(
-                    this@MainActivity,
-                    "${fetched.size} channels ready",
+                    "Nayi list nahi mili, purani list dikha rahe hain",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -527,10 +586,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private class ChannelCardAdapter(
+        private val fallbackDrawable: Drawable,
         private val onClick: (IptvChannel) -> Unit
     ) : RecyclerView.Adapter<ChannelCardAdapter.ChannelViewHolder>() {
 
         private var items: List<IptvChannel> = emptyList()
+
+        // ~6MB bounded cache so low-RAM STB hardware stays fast & safe
+        private val logoCache = object : LruCache<String, Bitmap>(6 * 1024 * 1024) {
+            override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+        }
 
         fun submitList(newItems: List<IptvChannel>) {
             items = newItems
@@ -560,19 +625,26 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = lp
             }
 
-            val badge = TextView(ctx).apply {
+            val logoBox = LinearLayout(ctx).apply {
                 gravity = Gravity.CENTER
-                setTextColor(Color.parseColor(ACCENT_CYAN))
-                textSize = 12f
-                typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
                 background = GradientDrawable().apply {
                     shape = GradientDrawable.RECTANGLE
                     cornerRadius = d(10).toFloat()
                     setColor(Color.parseColor("#102536"))
                     setStroke(d(1), Color.parseColor("#1E4966"))
                 }
-                layoutParams = LinearLayout.LayoutParams(d(44), d(36))
+                setPadding(d(4), d(4), d(4), d(4))
+                layoutParams = LinearLayout.LayoutParams(d(48), d(40))
             }
+
+            val logoIv = ImageView(ctx).apply {
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            logoBox.addView(logoIv)
 
             val infoCol = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
@@ -618,32 +690,103 @@ class MainActivity : AppCompatActivity() {
 
             infoCol.addView(titleTv)
             infoCol.addView(groupTv)
-            card.addView(badge)
+            card.addView(logoBox)
             card.addView(infoCol)
             card.addView(actionTv)
 
-            return ChannelViewHolder(card, badge, titleTv, groupTv)
+            return ChannelViewHolder(card, logoIv, titleTv, groupTv)
         }
 
         override fun onBindViewHolder(holder: ChannelViewHolder, position: Int) {
             val item = items[position]
-            holder.bind(item, position + 1, onClick)
+            holder.bind(item, fallbackDrawable, logoCache, onClick)
         }
 
         override fun getItemCount(): Int = items.size
 
         class ChannelViewHolder(
             itemView: View,
-            private val badge: TextView,
+            private val logoIv: ImageView,
             private val titleTv: TextView,
             private val groupTv: TextView
         ) : RecyclerView.ViewHolder(itemView) {
 
-            fun bind(channel: IptvChannel, index: Int, onClick: (IptvChannel) -> Unit) {
-                badge.text = index.toString()
+            private var loadJob: Job? = null
+
+            fun bind(
+                channel: IptvChannel,
+                fallbackDrawable: Drawable,
+                logoCache: LruCache<String, Bitmap>,
+                onClick: (IptvChannel) -> Unit
+            ) {
+                loadJob?.cancel()
                 titleTv.text = channel.name
                 groupTv.text = channel.group
                 itemView.setOnClickListener { onClick(channel) }
+
+                val logoUrl = channel.logoUrl.trim()
+                logoIv.tag = logoUrl
+
+                if (logoUrl.isEmpty() ||
+                    !(logoUrl.startsWith("http://", ignoreCase = true) ||
+                        logoUrl.startsWith("https://", ignoreCase = true))
+                ) {
+                    logoIv.setImageDrawable(fallbackDrawable)
+                    return
+                }
+
+                val cached = logoCache.get(logoUrl)
+                if (cached != null && !cached.isRecycled) {
+                    logoIv.setImageBitmap(cached)
+                    return
+                }
+
+                logoIv.setImageDrawable(fallbackDrawable)
+                loadJob = kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+                    val bmp = downloadScaledLogo(logoUrl, 96, 96)
+                    if (bmp != null) {
+                        logoCache.put(logoUrl, bmp)
+                        withContext(Dispatchers.Main) {
+                            if (logoIv.tag == logoUrl && !bmp.isRecycled) {
+                                logoIv.setImageBitmap(bmp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            private fun downloadScaledLogo(urlStr: String, reqW: Int, reqH: Int): Bitmap? {
+                var conn: HttpURLConnection? = null
+                return try {
+                    conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 5_000
+                        readTimeout = 6_000
+                        instanceFollowRedirects = true
+                        setRequestProperty("User-Agent", "PlusCast/1.0 (IPTV)")
+                    }
+                    if (conn.responseCode !in 200..299) return null
+                    val bytes = conn.inputStream.use { it.readBytes() }
+                    if (bytes.isEmpty()) return null
+
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+                    var sample = 1
+                    while (bounds.outHeight / sample > reqH * 2 || bounds.outWidth / sample > reqW * 2) {
+                        sample *= 2
+                    }
+
+                    val opts = BitmapFactory.Options().apply {
+                        inSampleSize = sample.coerceAtLeast(1)
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                    }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                } catch (_: Exception) {
+                    null
+                } finally {
+                    conn?.disconnect()
+                }
             }
         }
     }
