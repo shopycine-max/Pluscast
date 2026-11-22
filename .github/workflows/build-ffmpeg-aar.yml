@@ -36,15 +36,18 @@ jobs:
 
       - name: Build FFmpeg native libs and decoder AAR
         env:
-          NDK_PATH: /usr/local/lib/android/sdk/ndk/26.1.10909125
           FFMPEG_PATH: $HOME/ffmpeg
         run: |
           git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_PATH"
-          cd media3/libraries/decoder_ffmpeg/src/main/jni
 
-          for abi in arm64-v8a armeabi-v7a; do
-            ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_PATH" "$abi" --enable-decoder=mp2 --enable-decoder=mp2float --enable-decoder=mp3 --enable-decoder=ac3 --enable-decoder=eac3 --enable-decoder=dca
-          done
+          NDK_DIR="/usr/local/lib/android/sdk/ndk/26.1.10909125"
+          if [ ! -d "$NDK_DIR" ]; then
+            NDK_DIR=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | head -n 1)
+          fi
+          echo "Using NDK_DIR: $NDK_DIR"
+
+          cd media3/libraries/decoder_ffmpeg/src/main/jni
+          ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_DIR" "linux-x86_64" "mp2 mp2float mp3 ac3 eac3 dca"
 
           cd "$GITHUB_WORKSPACE/media3"
           ./gradlew :libraries:decoder_ffmpeg:bundleReleaseAar
