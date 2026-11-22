@@ -2,6 +2,7 @@ package com.pluscast.tvcast
 
 import android.content.Context
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -13,11 +14,14 @@ import java.io.FileInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -61,7 +65,7 @@ object LocalMediaServer {
 
         val mimeType = resolveMimeType(appContext, uri, fallbackMime)
         val length = resolveContentLength(appContext, uri)
-        val hostIp = getLocalLanIpv4() ?: return@withContext null
+        val hostIp = getLocalLanIpv4(appContext) ?: return@withContext null
 
         ensureServerStarted()
         val port = boundPort
@@ -69,7 +73,9 @@ object LocalMediaServer {
 
         val id = Integer.toHexString((rawUriOrPath + System.nanoTime()).hashCode())
         mediaEntries[id] = MediaEntry(uri = uri, mimeType = mimeType, length = length)
-        return@withContext "http://$hostIp:$port/media/$id"
+        val streamUrl = "http://$hostIp:$port/media/$id"
+        Log.d(TAG, "Registered local media URL: $streamUrl (mime=$mimeType, len=$length)")
+        return@withContext streamUrl
     }
 
     fun stopServer() {
@@ -283,7 +289,21 @@ object LocalMediaServer {
         return -1L
     }
 
-    private fun getLocalLanIpv4(): String? {
+    private fun getLocalLanIpv4(context: Context): String? {
+        try {
+            val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            @Suppress("DEPRECATION")
+            val ipInt = wifiManager?.connectionInfo?.ipAddress ?: 0
+            if (ipInt != 0) {
+                val bytes = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(ipInt).array()
+                val addr = InetAddress.getByAddress(bytes)
+                if (addr is Inet4Address && !addr.isLoopbackAddress && addr.isSiteLocalAddress) {
+                    return addr.hostAddress
+                }
+            }
+        } catch (_: Exception) {
+        }
+
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
             for (intf in interfaces) {
