@@ -9,6 +9,7 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
@@ -18,13 +19,15 @@ import android.widget.ImageView
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
-import com.google.android.gms.cast.framework.CastButtonFactory
+import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.cast.framework.CastContext
 import com.pluscast.tvcast.iptv.IptvChannel
 import com.pluscast.tvcast.iptv.M3uParser
 import com.pluscast.tvcast.server.LocalMediaServer
+import kotlinx.coroutines.launch
 import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
@@ -43,6 +46,8 @@ class MainActivity : AppCompatActivity() {
 
     private val ioExecutor = Executors.newFixedThreadPool(4)
     private val logoCache = ConcurrentHashMap<String, Bitmap>()
+    private val dlnaController by lazy { DlnaController(this) }
+    private var selectedDlnaDevice: DlnaDevice? = null
 
     private var localServer: LocalMediaServer? = null
     private var channels: List<IptvChannel> = emptyList()
@@ -354,6 +359,10 @@ class MainActivity : AppCompatActivity() {
             val intent = Intent(this, PlayerActivity::class.java).apply {
                 putExtra("MEDIA_URL", url)
                 putExtra("MEDIA_TITLE", title)
+                selectedDlnaDevice?.let { device ->
+                    putExtra("DLNA_DEVICE_NAME", device.friendlyName)
+                    putExtra("DLNA_CONTROL_URL", device.controlUrl)
+                }
             }
             startActivity(intent)
         } catch (e: Exception) {
@@ -362,18 +371,58 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun onTopRightCastClicked() {
+        Toast.makeText(this, "DLNA devices khoj raha hai...", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            val devices = dlnaController.discoverRenderers()
+            if (isFinishing || isDestroyed) return@launch
+
+            if (devices.isEmpty()) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Koi DLNA device nahi mila. Same Wi-Fi check karein.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            val names = devices.map { it.friendlyName }.toTypedArray()
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("DLNA Device Chunein")
+                .setItems(names) { _, which ->
+                    val device = devices[which]
+                    selectedDlnaDevice = device
+                    Toast.makeText(
+                        this@MainActivity,
+                        "${device.friendlyName} select ho gaya",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         return try {
             menuInflater.inflate(R.menu.cast_menu, menu)
             val menuItem = menu.findItem(R.id.media_route_menu_item)
-            if (menuItem != null) {
-                CastButtonFactory.setUpMediaRouteButton(applicationContext, menu, R.id.media_route_menu_item)
+            menuItem?.actionView?.setOnClickListener {
+                onTopRightCastClicked()
             }
             true
         } catch (e: Exception) {
             e.printStackTrace()
             false
         }
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == R.id.media_route_menu_item) {
+            onTopRightCastClicked()
+            return true
+        }
+        return super.onOptionsItemSelected(item)
     }
 
     override fun onResume() {
