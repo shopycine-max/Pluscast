@@ -10,7 +10,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.ProgressBar
 import android.widget.Toast
+import androidx.annotation.OptIn
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
@@ -23,6 +25,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -36,17 +39,29 @@ import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadRequestData
 import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.framework.CastContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class PlayerActivity : AppCompatActivity() {
 
+    companion object {
+        const val EXTRA_MEDIA_URL = "extra_media_url"
+        const val EXTRA_MEDIA_TITLE = "extra_media_title"
+        const val EXTRA_MIME_TYPE = "extra_mime_type"
+    }
+
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
+    private var progressBar: ProgressBar? = null
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast Media"
+    private var mimeType: String = "video/mp4"
     private var isCastingToTv: Boolean = false
     private var isScreenLocked: Boolean = false
     private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = FILL
+    private var retryCount: Int = 0
+    private var retryJob: Job? = null
     private val overlayButtons = mutableListOf<ImageButton>()
     private var unlockButton: ImageButton? = null
     private val dlnaController by lazy { DlnaController(this) }
@@ -56,8 +71,24 @@ class PlayerActivity : AppCompatActivity() {
         setContentView(R.layout.activity_player)
 
         playerView = findViewById(R.id.playerView)
-        mediaUrl = intent.getStringExtra("MEDIA_URL").orEmpty()
-        mediaTitle = intent.getStringExtra("MEDIA_TITLE") ?: "PlusCast Media"
+        val pbId = resources.getIdentifier("progressBar", "id", packageName)
+        if (pbId != 0) {
+            progressBar = findViewById(pbId)
+        }
+
+        mediaUrl = intent.getStringExtra("MEDIA_URL")?.trim()
+            .takeUnless { it.isNullOrEmpty() }
+            ?: intent.getStringExtra(EXTRA_MEDIA_URL)?.trim().orEmpty()
+
+        mediaTitle = intent.getStringExtra("MEDIA_TITLE")?.trim()
+            .takeUnless { it.isNullOrEmpty() }
+            ?: intent.getStringExtra(EXTRA_MEDIA_TITLE)?.trim()
+                .takeUnless { it.isNullOrEmpty() }
+            ?: "PlusCast Media"
+
+        mimeType = intent.getStringExtra(EXTRA_MIME_TYPE)?.trim()
+            .takeUnless { it.isNullOrEmpty() }
+            ?: detectMimeType(mediaUrl)
 
         if (mediaUrl.isEmpty()) {
             Toast.makeText(this, "Media URL nahi mila", Toast.LENGTH_SHORT).show()
@@ -72,17 +103,20 @@ class PlayerActivity : AppCompatActivity() {
         addLockButton()
         addUnlockButton()
         setupControllerVisibility()
+        setupXmlCastControls()
+        initializePlayer()
         tryCastMediaIfConnected()
 
-        val preselectedControlUrl = intent.getStringExtra("DLNA_CONTROL_URL").orEmpty()
+        val preselectedControlUrl = intent.getStringExtra("DLNA_CONTROL_URL")?.trim().orEmpty()
         if (preselectedControlUrl.isNotEmpty()) {
-            val preselectedName = intent.getStringExtra("DLNA_DEVICE_NAME") ?: "DLNA Renderer"
-            startDlnaPlayback(
-                DlnaDevice(
-                    friendlyName = preselectedName,
-                    controlUrl = preselectedControlUrl
-                )
+            val preselectedName = intent.getStringExtra("DLNA_DEVICE_NAME")?.trim()
+                .takeUnless { it.isNullOrEmpty() } ?: "DLNA Renderer"
+            val device = DlnaDevice(
+                friendlyName = preselectedName,
+                controlUrl = preselectedControlUrl
             )
+            DlnaDeviceStore.saveLastDevice(this, device)
+            startDlnaPlayback(device)
         }
     }
 
@@ -117,6 +151,28 @@ class PlayerActivity : AppCompatActivity() {
                     }
                 }
             )
+        }
+    }
+
+    private fun setupXmlCastControls() {
+        val castId = resources.getIdentifier("btnCastDlna", "id", packageName)
+        val rescanId = resources.getIdentifier("btnRescanDlna", "id", packageName)
+
+        if (castId != 0) {
+            findViewById<View>(castId)?.setOnClickListener {
+                val saved = DlnaDeviceStore.getLastDevice(this)
+                if (saved != null) {
+                    startDlnaPlayback(saved)
+                } else {
+                    discoverAndShowDlnaDevices()
+                }
+            }
+        }
+
+        if (rescanId != 0) {
+            findViewById<View>(rescanId)?.setOnClickListener {
+                discoverAndShowDlnaDevices()
+            }
         }
     }
 
@@ -197,7 +253,16 @@ class PlayerActivity : AppCompatActivity() {
                     rightMargin = marginPx
                 }
                 setOnClickListener {
+                    val saved = DlnaDeviceStore.getLastDevice(this@PlayerActivity)
+                    if (saved != null) {
+                        startDlnaPlayback(saved)
+                    } else {
+                        discoverAndShowDlnaDevices()
+                    }
+                }
+                setOnLongClickListener {
                     discoverAndShowDlnaDevices()
+                    true
                 }
             }
             overlayButtons.add(dlnaButton)
@@ -308,6 +373,7 @@ class PlayerActivity : AppCompatActivity() {
                 .setTitle("DLNA Device Chunein")
                 .setItems(names) { _, which ->
                     val selectedDevice = devices[which]
+                    DlnaDeviceStore.saveLastDevice(this@PlayerActivity, selectedDevice)
                     startDlnaPlayback(selectedDevice)
                 }
                 .setNegativeButton("Cancel", null)
@@ -316,7 +382,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun startDlnaPlayback(device: DlnaDevice) {
-        val mimeType = detectMimeType(mediaUrl)
+        val resolvedMime = mimeType.ifBlank { detectMimeType(mediaUrl) }
         Toast.makeText(this, "${device.friendlyName} par bhej raha hai...", Toast.LENGTH_SHORT).show()
 
         lifecycleScope.launch {
@@ -324,7 +390,7 @@ class PlayerActivity : AppCompatActivity() {
                 device = device,
                 mediaUrl = mediaUrl,
                 title = mediaTitle,
-                mimeType = mimeType
+                mimeType = resolvedMime
             )
             if (isFinishing || isDestroyed) return@launch
 
@@ -339,9 +405,11 @@ class PlayerActivity : AppCompatActivity() {
             } else {
                 Toast.makeText(
                     this@PlayerActivity,
-                    "DLNA fail: ${result.message}",
+                    "DLNA fail: ${result.message} — dobara scan kar rahe hain",
                     Toast.LENGTH_LONG
                 ).show()
+                DlnaDeviceStore.clearLastDevice(this@PlayerActivity)
+                discoverAndShowDlnaDevices()
             }
         }
     }
@@ -349,6 +417,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun detectMimeType(url: String): String {
         return when {
             url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
+            url.endsWith(".ts", ignoreCase = true) || url.contains(".ts?", ignoreCase = true) -> "video/mp2t"
             url.contains(".mp4", ignoreCase = true) -> "video/mp4"
             url.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
             url.contains(".webm", ignoreCase = true) -> "video/webm"
@@ -405,15 +474,20 @@ class PlayerActivity : AppCompatActivity() {
         super.onStart()
         if (player == null && mediaUrl.isNotEmpty()) {
             initializePlayer()
+        } else if (!isCastingToTv) {
+            player?.playWhenReady = true
         }
     }
 
+    @OptIn(UnstableApi::class)
     private fun initializePlayer() {
         try {
+            releasePlayer()
+
             val httpDataSourceFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent("PlusCast/1.0 (Android)")
                 .setConnectTimeoutMs(15_000)
-                .setReadTimeoutMs(20_000)
+                .setReadTimeoutMs(25_000)
                 .setAllowCrossProtocolRedirects(true)
 
             val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
@@ -423,10 +497,10 @@ class PlayerActivity : AppCompatActivity() {
 
             val loadControl: LoadControl = DefaultLoadControl.Builder()
                 .setBufferDurationsMs(
-                    15_000, // minBufferMs
-                    50_000, // maxBufferMs
-                    2_500,  // bufferForPlaybackMs
-                    5_000   // bufferForPlaybackAfterRebufferMs
+                    /* minBufferMs = */ 20_000,
+                    /* maxBufferMs = */ 50_000,
+                    /* bufferForPlaybackMs = */ 2_500,
+                    /* bufferForPlaybackAfterRebufferMs = */ 5_000
                 )
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .build()
@@ -455,6 +529,21 @@ class PlayerActivity : AppCompatActivity() {
             }
 
             exoPlayer.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    when (playbackState) {
+                        Player.STATE_BUFFERING -> {
+                            progressBar?.visibility = View.VISIBLE
+                        }
+                        Player.STATE_READY -> {
+                            retryCount = 0
+                            progressBar?.visibility = View.GONE
+                        }
+                        Player.STATE_ENDED, Player.STATE_IDLE -> {
+                            progressBar?.visibility = View.GONE
+                        }
+                    }
+                }
+
                 override fun onTracksChanged(tracks: Tracks) {
                     val hasAudioTrack = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO && it.length > 0 }
                     if (!hasAudioTrack) {
@@ -467,11 +556,30 @@ class PlayerActivity : AppCompatActivity() {
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
-                    Toast.makeText(
-                        this@PlayerActivity,
-                        "Error (${error.errorCodeName}): ${error.message}",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    progressBar?.visibility = View.GONE
+                    if (retryCount < 3) {
+                        retryCount++
+                        val waitMs = retryCount * 1500L
+                        Toast.makeText(
+                            this@PlayerActivity,
+                            "Stream reconnect kar raha hai ($retryCount/3)...",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        retryJob?.cancel()
+                        retryJob = lifecycleScope.launch {
+                            delay(waitMs)
+                            if (!isFinishing && !isDestroyed && !isCastingToTv) {
+                                player?.prepare()
+                                player?.playWhenReady = true
+                            }
+                        }
+                    } else {
+                        Toast.makeText(
+                            this@PlayerActivity,
+                            "Error (${error.errorCodeName}): ${error.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
             })
 
@@ -495,7 +603,7 @@ class PlayerActivity : AppCompatActivity() {
             }
 
             val isHls = mediaUrl.contains(".m3u8", ignoreCase = true)
-            val mimeType = when {
+            val castMimeType = when {
                 isHls -> "application/x-mpegURL"
                 mediaUrl.contains(".mp4", ignoreCase = true) -> "video/mp4"
                 mediaUrl.contains(".mkv", ignoreCase = true) -> "video/x-matroska"
@@ -511,7 +619,7 @@ class PlayerActivity : AppCompatActivity() {
 
             val mediaInfo = MediaInfo.Builder(mediaUrl)
                 .setStreamType(streamType)
-                .setContentType(mimeType)
+                .setContentType(castMimeType)
                 .setMetadata(metadata)
                 .build()
 
@@ -530,6 +638,9 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun releasePlayer() {
+        retryJob?.cancel()
+        retryJob = null
+        progressBar?.visibility = View.GONE
         try {
             playerView?.player = null
             player?.release()
