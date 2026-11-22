@@ -592,7 +592,6 @@ class MainActivity : AppCompatActivity() {
 
         private var items: List<IptvChannel> = emptyList()
 
-        // ~6MB bounded cache so low-RAM STB hardware stays fast & safe
         private val logoCache = object : LruCache<String, Bitmap>(6 * 1024 * 1024) {
             override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
         }
