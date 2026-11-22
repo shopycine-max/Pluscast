@@ -23,6 +23,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -299,7 +300,10 @@ class PlayerActivity : AppCompatActivity() {
                 .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
                 .build()
 
-            val exoPlayer = ExoPlayer.Builder(this)
+            val renderersFactory = DefaultRenderersFactory(this)
+                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+
+            val exoPlayer = ExoPlayer.Builder(this, renderersFactory)
                 .setMediaSourceFactory(mediaSourceFactory)
                 .setAudioAttributes(audioAttributes, true)
                 .setHandleAudioBecomingNoisy(true)
