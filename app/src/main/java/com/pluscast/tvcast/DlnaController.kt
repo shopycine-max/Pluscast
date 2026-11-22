@@ -23,7 +23,8 @@ import java.util.Locale
 
 data class DlnaDevice(
     val friendlyName: String,
-    val controlUrl: String
+    val controlUrl: String,
+    val serviceType: String = "urn:schemas-upnp-org:service:AVTransport:1"
 )
 
 class DlnaController(private val context: Context? = null) {
@@ -61,7 +62,8 @@ class DlnaController(private val context: Context? = null) {
                 "ssdp:all",
                 "upnp:rootdevice",
                 "urn:schemas-upnp-org:device:MediaRenderer:1",
-                "urn:schemas-upnp-org:service:AVTransport:1"
+                "urn:schemas-upnp-org:service:AVTransport:1",
+                "urn:schemas-upnp-org:service:AVTransport:2"
             )
 
             var unicastSocket: DatagramSocket? = null
@@ -165,7 +167,9 @@ class DlnaController(private val context: Context? = null) {
 
             for (loc in locations) {
                 val parsed = parseDeviceDescription(loc) ?: continue
-                found["${parsed.friendlyName}|${parsed.controlUrl}"] = parsed
+                if (parsed.controlUrl.isNotBlank()) {
+                    found["${parsed.friendlyName}|${parsed.controlUrl}"] = parsed
+                }
             }
 
             found.values.toList()
@@ -177,8 +181,12 @@ class DlnaController(private val context: Context? = null) {
         title: String = "PlusCast Media",
         mimeType: String = "video/mp4"
     ): Boolean = withContext(Dispatchers.IO) {
-        if (device.controlUrl.isBlank()) return@withContext false
+        if (device.controlUrl.isBlank()) {
+            Log.e(TAG, "Empty controlUrl for ${device.friendlyName}")
+            return@withContext false
+        }
 
+        val serviceUrn = device.serviceType.ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
         val escapedUrl = escapeXml(mediaUrl)
         val escapedTitle = escapeXml(title)
         val escapedMime = escapeXml(mimeType)
@@ -186,27 +194,38 @@ class DlnaController(private val context: Context? = null) {
 
         val rawDidl =
             """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
-        val didlMetadata = escapeXml(rawDidl)
 
-        val setUriSoap = """
+        fun buildSetUriSoap(metaDataXml: String): String = """
             <?xml version="1.0" encoding="utf-8"?>
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
               <s:Body>
-                <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+                <u:SetAVTransportURI xmlns:u="$serviceUrn">
                   <InstanceID>0</InstanceID>
                   <CurrentURI>$escapedUrl</CurrentURI>
-                  <CurrentURIMetaData>$didlMetadata</CurrentURIMetaData>
+                  <CurrentURIMetaData>${escapeXml(metaDataXml)}</CurrentURIMetaData>
                 </u:SetAVTransportURI>
               </s:Body>
             </s:Envelope>
         """.trimIndent()
 
-        if (!sendSoapAction(
+        var uriSetOk = sendSoapAction(
+            controlUrl = device.controlUrl,
+            soapAction = "\"$serviceUrn#SetAVTransportURI\"",
+            body = buildSetUriSoap(rawDidl)
+        )
+
+        // Kuch STB/renderers DIDL metadata parse na kar paane par empty metadata ke saath accept kar lete hain
+        if (!uriSetOk) {
+            Log.w(TAG, "Retrying SetAVTransportURI with empty metadata on ${device.friendlyName}")
+            uriSetOk = sendSoapAction(
                 controlUrl = device.controlUrl,
-                soapAction = "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"",
-                body = setUriSoap
+                soapAction = "\"$serviceUrn#SetAVTransportURI\"",
+                body = buildSetUriSoap("")
             )
-        ) {
+        }
+
+        if (!uriSetOk) {
+            Log.e(TAG, "SetAVTransportURI failed on ${device.friendlyName}")
             return@withContext false
         }
 
@@ -214,7 +233,7 @@ class DlnaController(private val context: Context? = null) {
             <?xml version="1.0" encoding="utf-8"?>
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
               <s:Body>
-                <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+                <u:Play xmlns:u="$serviceUrn">
                   <InstanceID>0</InstanceID>
                   <Speed>1</Speed>
                 </u:Play>
@@ -224,7 +243,7 @@ class DlnaController(private val context: Context? = null) {
 
         sendSoapAction(
             controlUrl = device.controlUrl,
-            soapAction = "\"urn:schemas-upnp-org:service:AVTransport:1#Play\"",
+            soapAction = "\"$serviceUrn#Play\"",
             body = playSoap
         )
     }
@@ -276,35 +295,44 @@ class DlnaController(private val context: Context? = null) {
                 ?.takeIf { it.isNotEmpty() }
                 ?: return null
 
-            val rawControlUrl = extractAvTransportControlUrl(xml)?.trim()
-            val resolvedControlUrl = if (!rawControlUrl.isNullOrEmpty()) {
-                URL(baseUrl, rawControlUrl).toString()
+            val (serviceType, rawControlUrl) = extractAvTransportInfo(xml)
+            val resolvedControlUrl = if (!rawControlUrl.isNullOrBlank()) {
+                URL(baseUrl, rawControlUrl.trim()).toString()
             } else {
                 ""
             }
 
+            Log.d(TAG, "Device: $friendlyName | Service: $serviceType | ControlURL: $resolvedControlUrl")
+
             DlnaDevice(
-                friendlyName = if (resolvedControlUrl.isEmpty()) "$friendlyName (No AVTransport)" else friendlyName,
-                controlUrl = resolvedControlUrl
+                friendlyName = friendlyName,
+                controlUrl = resolvedControlUrl,
+                serviceType = serviceType ?: "urn:schemas-upnp-org:service:AVTransport:1"
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "Device description parse failed for $locationUrl", e)
             null
         } finally {
             conn?.disconnect()
         }
     }
 
-    private fun extractAvTransportControlUrl(xml: String): String? {
-        val serviceRegex = Regex("<(?:[a-zA-Z0-9_-]+:)?service\\b[^>]*>([\\s\\S]*?)</(?:[a-zA-Z0-9_-]+:)?service>", RegexOption.IGNORE_CASE)
+    private fun extractAvTransportInfo(xml: String): Pair<String?, String?> {
+        val serviceRegex = Regex(
+            "<(?:[a-zA-Z0-9_-]+:)?service\\b[^>]*>([\\s\\S]*?)</(?:[a-zA-Z0-9_-]+:)?service>",
+            RegexOption.IGNORE_CASE
+        )
         for (match in serviceRegex.findAll(xml)) {
             val block = match.groupValues[1]
-            val serviceType = extractTagValue(block, "serviceType") ?: ""
-            if (serviceType.contains("AVTransport", ignoreCase = true)) {
-                val ctrl = extractTagValue(block, "controlURL")
-                if (!ctrl.isNullOrBlank()) return ctrl
+            val serviceType = extractTagValue(block, "serviceType")?.trim()
+            if (serviceType != null && serviceType.contains("AVTransport", ignoreCase = true)) {
+                val ctrl = extractTagValue(block, "controlURL")?.trim()
+                if (!ctrl.isNullOrBlank()) {
+                    return serviceType to ctrl
+                }
             }
         }
-        return extractTagValue(xml, "controlURL")
+        return null to extractTagValue(xml, "controlURL")?.trim()
     }
 
     private fun sendSoapAction(controlUrl: String, soapAction: String, body: String): Boolean {
@@ -312,8 +340,8 @@ class DlnaController(private val context: Context? = null) {
         return try {
             val url = URL(controlUrl)
             conn = (url.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3000
-                readTimeout = 4000
+                connectTimeout = 4000
+                readTimeout = 5000
                 requestMethod = "POST"
                 doOutput = true
                 setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
@@ -323,8 +351,20 @@ class DlnaController(private val context: Context? = null) {
                 writer.write(body)
                 writer.flush()
             }
-            conn.responseCode in 200..299
-        } catch (_: Exception) {
+            val code = conn.responseCode
+            Log.d(TAG, "SOAP $soapAction -> HTTP $code")
+            if (code !in 200..299) {
+                val errBody = try {
+                    conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty()
+                } catch (_: Exception) {
+                    ""
+                }
+                Log.e(TAG, "SOAP error ($code) on $controlUrl: $errBody")
+                return false
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "SOAP exception on $controlUrl for $soapAction", e)
             false
         } finally {
             conn?.disconnect()
