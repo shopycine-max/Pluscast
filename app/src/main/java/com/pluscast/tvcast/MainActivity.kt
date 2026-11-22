@@ -226,7 +226,7 @@ class MainActivity : AppCompatActivity() {
         val logoView = ImageView(this).apply {
             setImageDrawable(createLogoDrawable())
             contentDescription = "PlusCast IPTV Logo"
-            val lp = LinearLayout.LayoutParams(dp(44), dp(44))
+            val lp = LinearLayout.LayoutParams(dp(48), dp(48))
             lp.marginEnd = dp(12)
             layoutParams = lp
         }
@@ -753,84 +753,126 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun createLogoDrawable(): Drawable {
-        val size = dp(44).coerceAtLeast(28)
+        val size = dp(48).coerceAtLeast(36)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
 
         val f = size.toFloat()
-        val inset = f * 0.06f
-        val bgRect = RectF(inset, inset, f - inset, f - inset)
-        val corner = f * 0.24f
+        val pad = f * 0.06f
+        val cardRect = RectF(pad, pad, f - pad, f - pad)
+        val corner = f * 0.25f
 
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        // 1. Standard dark broadcast base with subtle vertical depth
+        val basePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             shader = LinearGradient(
-                0f, 0f, f, f,
+                0f, cardRect.top, 0f, cardRect.bottom,
                 intArrayOf(
-                    Color.parseColor("#101B2E"),
-                    Color.parseColor("#060A12")
+                    Color.parseColor("#132036"),
+                    Color.parseColor("#070C16")
                 ),
                 null,
                 Shader.TileMode.CLAMP
             )
         }
-        canvas.drawRoundRect(bgRect, corner, corner, bgPaint)
+        canvas.drawRoundRect(cardRect, corner, corner, basePaint)
 
-        // Broadcast TV bezel
-        val bezelRect = RectF(f * 0.17f, f * 0.24f, f * 0.83f, f * 0.72f)
-        val bezelFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        // Top subtle highlight sheen for polished app-icon depth
+        val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
-            color = Color.parseColor("#0B1322")
+            shader = LinearGradient(
+                0f, cardRect.top, 0f, cardRect.centerY(),
+                intArrayOf(
+                    Color.parseColor("#2438BDF8"),
+                    Color.TRANSPARENT
+                ),
+                null,
+                Shader.TileMode.CLAMP
+            )
         }
-        val bezelStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val sheenRect = RectF(cardRect.left, cardRect.top, cardRect.right, cardRect.centerY() + f * 0.04f)
+        canvas.drawRoundRect(sheenRect, corner, corner, sheenPaint)
+
+        // Crisp outer border
+        val outerBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = (f * 0.042f).coerceAtLeast(1.8f)
+            strokeWidth = (f * 0.024f).coerceAtLeast(1.1f)
+            color = Color.parseColor("#284B73")
+        }
+        canvas.drawRoundRect(cardRect, corner, corner, outerBorder)
+
+        // 2. Centered TV / Cast Screen Frame
+        val tvLeft = f * 0.21f
+        val tvTop = f * 0.25f
+        val tvRight = f * 0.79f
+        val tvBottom = f * 0.67f
+        val tvRect = RectF(tvLeft, tvTop, tvRight, tvBottom)
+        val tvRadius = f * 0.075f
+
+        val tvFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.parseColor("#09111E")
+        }
+        val tvStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = (f * 0.042f).coerceAtLeast(1.6f)
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
             color = Color.parseColor(ACCENT_CYAN)
         }
-        canvas.drawRoundRect(bezelRect, f * 0.07f, f * 0.07f, bezelFill)
-        canvas.drawRoundRect(bezelRect, f * 0.07f, f * 0.07f, bezelStroke)
+        canvas.drawRoundRect(tvRect, tvRadius, tvRadius, tvFill)
+        canvas.drawRoundRect(tvRect, tvRadius, tvRadius, tvStroke)
 
-        // Clean live signal arcs on top-left inside bezel
+        // 3. Cast / Signal Arcs (left side inside screen)
         val wavePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = (f * 0.032f).coerceAtLeast(1.3f)
+            strokeWidth = (f * 0.032f).coerceAtLeast(1.25f)
             strokeCap = Paint.Cap.ROUND
             color = Color.parseColor(ACCENT_SKY)
         }
-        canvas.drawArc(RectF(f * 0.25f, f * 0.38f, f * 0.36f, f * 0.49f), -75f, 75f, false, wavePaint)
-        canvas.drawArc(RectF(f * 0.25f, f * 0.31f, f * 0.43f, f * 0.49f), -75f, 75f, false, wavePaint)
+        canvas.drawArc(
+            RectF(f * 0.27f, f * 0.40f, f * 0.37f, f * 0.50f),
+            -70f, 70f, false, wavePaint
+        )
+        canvas.drawArc(
+            RectF(f * 0.27f, f * 0.33f, f * 0.44f, f * 0.50f),
+            -70f, 70f, false, wavePaint
+        )
 
-        // Sharp broadcast play mark
+        // 4. Balanced Play Triangle
         val playPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             color = Color.parseColor(ACCENT_CYAN)
         }
         val playPath = Path().apply {
-            moveTo(f * 0.44f, f * 0.37f)
-            lineTo(f * 0.65f, f * 0.48f)
-            lineTo(f * 0.44f, f * 0.59f)
+            moveTo(f * 0.46f, f * 0.37f)
+            lineTo(f * 0.66f, f * 0.46f)
+            lineTo(f * 0.46f, f * 0.55f)
             close()
         }
         canvas.drawPath(playPath, playPaint)
 
-        // Gold live indicator dot
+        // 5. Live Gold Dot
         val liveDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             color = Color.parseColor(ACCENT_GOLD)
         }
-        canvas.drawCircle(f * 0.72f, f * 0.32f, (f * 0.042f).coerceAtLeast(1.5f), liveDotPaint)
+        canvas.drawCircle(
+            f * 0.70f,
+            f * 0.33f,
+            (f * 0.036f).coerceAtLeast(1.4f),
+            liveDotPaint
+        )
 
-        // Broadcast stand base
+        // 6. Clean Broadcast Stand Below Screen
         val standPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
-            strokeWidth = (f * 0.040f).coerceAtLeast(1.6f)
+            strokeWidth = (f * 0.040f).coerceAtLeast(1.5f)
             strokeCap = Paint.Cap.ROUND
             color = Color.parseColor(ACCENT_CYAN)
         }
-        canvas.drawLine(f * 0.50f, f * 0.72f, f * 0.50f, f * 0.80f, standPaint)
-        canvas.drawLine(f * 0.39f, f * 0.80f, f * 0.61f, f * 0.80f, standPaint)
+        canvas.drawLine(f * 0.50f, tvBottom, f * 0.50f, f * 0.76f, standPaint)
+        canvas.drawLine(f * 0.38f, f * 0.76f, f * 0.62f, f * 0.76f, standPaint)
 
         return BitmapDrawable(resources, bitmap)
     }
