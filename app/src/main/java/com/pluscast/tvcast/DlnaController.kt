@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.OutputStreamWriter
@@ -190,6 +191,13 @@ class DlnaController(private val context: Context? = null) {
             return@withContext DlnaPlayResult(false, "Control URL missing")
         }
 
+        if (mediaUrl.contains("://127.0.0.1") || mediaUrl.contains("://localhost")) {
+            Log.w(
+                TAG,
+                "mediaUrl uses loopback address ($mediaUrl); external renderer may not reach it."
+            )
+        }
+
         val serviceUrn = device.serviceType.ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
         val escapedUrl = escapeXml(mediaUrl)
         val escapedTitle = escapeXml(title)
@@ -229,6 +237,8 @@ class DlnaController(private val context: Context? = null) {
         if (!setUriRes.success) {
             return@withContext DlnaPlayResult(false, "SetURI fail: ${setUriRes.message}")
         }
+
+        delay(250)
 
         val playSoap = """
             <?xml version="1.0" encoding="utf-8"?>
