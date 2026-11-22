@@ -43,8 +43,10 @@ class PlayerActivity : AppCompatActivity() {
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast Media"
     private var isCastingToTv: Boolean = false
+    private var isScreenLocked: Boolean = false
     private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = FILL
     private val overlayButtons = mutableListOf<ImageButton>()
+    private var unlockButton: ImageButton? = null
     private val dlnaController by lazy { DlnaController(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,6 +67,8 @@ class PlayerActivity : AppCompatActivity() {
         addRotateButton()
         addZoomToggleButton()
         addDlnaButton()
+        addLockButton()
+        addUnlockButton()
         setupControllerVisibility()
         tryCastMediaIfConnected()
 
@@ -83,7 +87,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun applyImmersiveSystemBars(isLandscape: Boolean) {
         try {
             val controller = WindowCompat.getInsetsController(window, window.decorView)
-            if (isLandscape) {
+            if (isLandscape || isScreenLocked) {
                 controller.hide(WindowInsetsCompat.Type.systemBars())
                 controller.systemBarsBehavior =
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -101,6 +105,11 @@ class PlayerActivity : AppCompatActivity() {
             controllerHideOnTouch = true
             setControllerVisibilityListener(
                 PlayerView.ControllerVisibilityListener { visibility ->
+                    if (isScreenLocked) {
+                        overlayButtons.forEach { it.visibility = View.GONE }
+                        unlockButton?.visibility = View.VISIBLE
+                        return@ControllerVisibilityListener
+                    }
                     overlayButtons.forEach { btn ->
                         btn.visibility = if (visibility == View.VISIBLE) View.VISIBLE else View.GONE
                     }
@@ -194,6 +203,86 @@ class PlayerActivity : AppCompatActivity() {
             dlnaButton.bringToFront()
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    private fun addLockButton() {
+        try {
+            val rootView = findViewById<ViewGroup>(android.R.id.content)
+            val sizePx = (48 * resources.displayMetrics.density).toInt()
+            val marginPx = (16 * resources.displayMetrics.density).toInt()
+            val gapPx = (10 * resources.displayMetrics.density).toInt()
+
+            val lockButton = ImageButton(this).apply {
+                setImageResource(android.R.drawable.ic_lock_lock)
+                setColorFilter(Color.parseColor("#FACC15"))
+                setBackgroundColor(Color.parseColor("#99000000"))
+                contentDescription = "Lock Screen"
+                elevation = 12f
+                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    topMargin = marginPx + (sizePx + gapPx) * 3
+                    rightMargin = marginPx
+                }
+                setOnClickListener {
+                    setScreenLocked(true)
+                }
+            }
+            overlayButtons.add(lockButton)
+            rootView.addView(lockButton)
+            lockButton.bringToFront()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun addUnlockButton() {
+        try {
+            val rootView = findViewById<ViewGroup>(android.R.id.content)
+            val sizePx = (52 * resources.displayMetrics.density).toInt()
+            val marginPx = (20 * resources.displayMetrics.density).toInt()
+
+            val btn = ImageButton(this).apply {
+                setImageResource(android.R.drawable.ic_lock_idle_lock)
+                setColorFilter(Color.parseColor("#FACC15"))
+                setBackgroundColor(Color.parseColor("#CC0F172A"))
+                contentDescription = "Unlock Screen"
+                elevation = 16f
+                visibility = View.GONE
+                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    topMargin = marginPx
+                    leftMargin = marginPx
+                }
+                setOnClickListener {
+                    setScreenLocked(false)
+                }
+            }
+            unlockButton = btn
+            rootView.addView(btn)
+            btn.bringToFront()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun setScreenLocked(locked: Boolean) {
+        isScreenLocked = locked
+        applyImmersiveSystemBars(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+
+        if (locked) {
+            playerView?.useController = false
+            playerView?.hideController()
+            overlayButtons.forEach { it.visibility = View.GONE }
+            unlockButton?.visibility = View.VISIBLE
+            unlockButton?.bringToFront()
+            Toast.makeText(this, "Screen Lock ON 🔐", Toast.LENGTH_SHORT).show()
+        } else {
+            unlockButton?.visibility = View.GONE
+            playerView?.useController = true
+            playerView?.showController()
+            overlayButtons.forEach { it.visibility = View.VISIBLE }
+            Toast.makeText(this, "Screen Lock OFF 🔓", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -298,6 +387,16 @@ class PlayerActivity : AppCompatActivity() {
             AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
         playerView?.requestLayout()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (isScreenLocked) {
+            Toast.makeText(this, "Screen lock hai, pehle unlock karein", Toast.LENGTH_SHORT).show()
+            return
+        }
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
     }
 
     override fun onStart() {
@@ -428,6 +527,7 @@ class PlayerActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         isCastingToTv = false
+        isScreenLocked = false
         releasePlayer()
     }
 
