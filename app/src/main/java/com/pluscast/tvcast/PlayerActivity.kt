@@ -16,6 +16,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -291,8 +293,15 @@ class PlayerActivity : AppCompatActivity() {
             val mediaSourceFactory = DefaultMediaSourceFactory(this)
                 .setDataSourceFactory(dataSourceFactory)
 
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build()
+
             val exoPlayer = ExoPlayer.Builder(this)
                 .setMediaSourceFactory(mediaSourceFactory)
+                .setAudioAttributes(audioAttributes, true)
+                .setHandleAudioBecomingNoisy(true)
                 .build()
 
             player = exoPlayer
