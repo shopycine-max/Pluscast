@@ -95,6 +95,7 @@ class MainActivity : AppCompatActivity() {
             localServer = server
         } catch (e: Exception) {
             e.printStackTrace()
+            Toast.makeText(this, "Local server start nahi ho paya: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -121,6 +122,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     addCategory(Intent.CATEGORY_OPENABLE)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     type = "*/*"
                     putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("video/*", "audio/*"))
                 }
@@ -182,7 +184,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Category-wise grouping: pehle category ke naam se group karke sort karein
         val grouped = matched.groupBy { channel ->
             channel.group?.trim()?.takeIf { it.isNotEmpty() } ?: "General"
         }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
@@ -317,6 +318,13 @@ class MainActivity : AppCompatActivity() {
 
         if (requestCode == REQUEST_PICK_LOCAL_MEDIA && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
+            try {
+                val takeFlags = data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION
+                if (takeFlags != 0) {
+                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            } catch (_: Exception) {
+            }
             copyUriToCacheAndServe(uri)
         }
     }
@@ -327,14 +335,24 @@ class MainActivity : AppCompatActivity() {
         ioExecutor.execute {
             try {
                 val outFile = File(cacheDir, "cast_local_media")
+                if (outFile.exists()) {
+                    outFile.delete()
+                }
+
                 contentResolver.openInputStream(uri)?.use { input ->
                     FileOutputStream(outFile).use { output ->
                         input.copyTo(output)
+                        output.flush()
                     }
+                } ?: throw IllegalStateException("Input stream null hai")
+
+                val server = localServer ?: run {
+                    val created = LocalMediaServer(this, 8080).also { it.start() }
+                    localServer = created
+                    created
                 }
 
-                val server = localServer
-                if (server != null && outFile.exists() && outFile.length() > 0L) {
+                if (outFile.exists() && outFile.length() > 0L) {
                     server.setFileToServe(outFile)
                     val streamUrl = server.getStreamUrl()
                     runOnUiThread {
@@ -348,7 +366,7 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 e.printStackTrace()
                 runOnUiThread {
-                    Toast.makeText(this, "Local media error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Local media error: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }
