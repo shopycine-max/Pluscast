@@ -25,7 +25,6 @@ jobs:
         run: |
           curl -fsSL "https://dl.google.com/android/repository/android-ndk-r26b-linux.zip" -o "$HOME/ndk.zip"
           unzip -q "$HOME/ndk.zip" -d "$HOME/ndk-bundle"
-          ls -la "$HOME/ndk-bundle"
 
       - name: Clone Media3 1.4.1
         run: |
@@ -39,11 +38,9 @@ jobs:
           git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git "$FFMPEG_PATH"
 
           NDK_DIR="$HOME/ndk-bundle/android-ndk-r26b"
-          echo "Using NDK_DIR: $NDK_DIR"
-
           cd media3/libraries/decoder_ffmpeg/src/main/jni
           for abi in arm64-v8a armeabi-v7a; do
-            ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_DIR" "linux-x86_64" "$abi"
+            ANDROID_ABI="$abi" ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_DIR" "linux-x86_64" "24"
           done
 
           cd "$GITHUB_WORKSPACE/media3"
