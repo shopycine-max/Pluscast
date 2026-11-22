@@ -38,7 +38,7 @@ jobs:
           MODULE_DIR="$GITHUB_WORKSPACE/media3/libraries/decoder_ffmpeg/src/main"
           JNI_DIR="$MODULE_DIR/jni"
 
-          git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git "$JNI_DIR/ffmpeg"
+          git clone --depth 1 --branch n7.0.2 https://git.ffmpeg.org/ffmpeg.git "$JNI_DIR/ffmpeg"
 
           cd "$JNI_DIR"
           sed -i '/--disable-postproc/d' build_ffmpeg.sh
@@ -48,7 +48,7 @@ jobs:
           done
 
           cd "$GITHUB_WORKSPACE/media3"
-          ./gradlew :libraries:decoder_ffmpeg:bundleReleaseAar
+          ./gradlew :libraries:decoder_ffmpeg:bundleReleaseAar --no-daemon
 
       - name: Upload AAR artifact
         uses: actions/upload-artifact@v4
