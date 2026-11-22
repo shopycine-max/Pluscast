@@ -47,7 +47,10 @@ jobs:
           echo "Using NDK_DIR: $NDK_DIR"
 
           cd media3/libraries/decoder_ffmpeg/src/main/jni
-          ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_DIR" "linux-x86_64" "mp2 mp2float mp3 ac3 eac3 dca"
+          DECODERS="mp2 mp2float mp3 ac3 eac3 dca"
+          for abi in arm64-v8a armeabi-v7a; do
+            ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_DIR" "$abi" "$DECODERS"
+          done
 
           cd "$GITHUB_WORKSPACE/media3"
           ./gradlew :libraries:decoder_ffmpeg:bundleReleaseAar
