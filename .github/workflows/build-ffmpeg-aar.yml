@@ -44,7 +44,7 @@ jobs:
 
           cd media3/libraries/decoder_ffmpeg/src/main/jni
           for abi in arm64-v8a armeabi-v7a; do
-            ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_DIR" "linux-x86_64" "$abi"
+            ./build_ffmpeg.sh "$FFMPEG_PATH" "$NDK_DIR" "$abi" "linux-x86_64"
           done
 
           cd "$GITHUB_WORKSPACE/media3"
