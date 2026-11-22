@@ -5,34 +5,39 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Subtle inner badge surface -->
+    <!-- Broadcast frame container -->
     <path
-        android:fillColor="#102536"
-        android:pathData="M30,30 L78,30 A8,8 0 0,1 86,38 L86,70 A8,8 0 0,1 78,78 L30,78 A8,8 0 0,1 22,70 L22,38 A8,8 0 0,1 30,30 Z" />
+        android:fillColor="#132238"
+        android:pathData="M28,31 L80,31 A7,7 0 0,1 87,38 L87,70 A7,7 0 0,1 80,77 L28,77 A7,7 0 0,1 21,70 L21,38 A7,7 0 0,1 28,31 Z" />
 
-    <!-- Crisp cyan frame border -->
+    <!-- Crisp cyan-tinted broadcast frame -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M30,30 L78,30 A8,8 0 0,1 86,38 L86,70 A8,8 0 0,1 78,78 L30,78 A8,8 0 0,1 22,70 L22,38 A8,8 0 0,1 30,30 Z"
-        android:strokeWidth="2.5"
+        android:pathData="M28,31 L80,31 A7,7 0 0,1 87,38 L87,70 A7,7 0 0,1 80,77 L28,77 A7,7 0 0,1 21,70 L21,38 A7,7 0 0,1 28,31 Z"
+        android:strokeWidth="2.6"
         android:strokeColor="#00E5FF" />
 
     <!-- Play triangle -->
     <path
         android:fillColor="#00E5FF"
-        android:pathData="M46,42 L68,54 L46,66 Z" />
+        android:pathData="M44,42 L65,54 L44,66 Z" />
 
-    <!-- Subtle top-right cast/signal arcs -->
+    <!-- Gold live/cast indicator dot -->
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M73,63 A3.5,3.5 0 1,1 72.99,63 Z" />
+
+    <!-- Cast signal arcs -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M67,35 A8,8 0 0,1 81,35"
+        android:pathData="M68,36 A7,7 0 0,1 81,36"
         android:strokeWidth="2.2"
-        android:strokeColor="#00E5FF"
+        android:strokeColor="#38BDF8"
         android:strokeLineCap="round" />
 
     <path
         android:fillColor="#00000000"
-        android:pathData="M70,39 A4,4 0 0,1 78,39"
+        android:pathData="M71,40 A3.8,3.8 0 0,1 78,40"
         android:strokeWidth="2.2"
         android:strokeColor="#00E5FF"
         android:strokeLineCap="round" />
