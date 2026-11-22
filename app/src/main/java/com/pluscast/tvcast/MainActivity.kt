@@ -67,9 +67,6 @@ class MainActivity : AppCompatActivity() {
         // India IPTV M3U playlist link (UI mein kahin nahi dikhega)
         private const val DEFAULT_PLAYLIST_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
 
-        // Allowed filter chips
-        private val FILTER_TABS = listOf("All", "Favorites", "Hindi", "Bhojpuri", "Bengali News")
-
         // Dark Broadcast / TV Palette
         private const val BG_PRIMARY = "#070B12"
         private const val BG_GRADIENT_TOP = "#0D1524"
@@ -99,6 +96,7 @@ class MainActivity : AppCompatActivity() {
     private var allChannels: List<IptvChannel> = emptyList()
     private var favoriteUrls: MutableSet<String> = mutableSetOf()
     private var selectedGroup: String = "All"
+    private var availableTabs: List<String> = listOf("All", "Favorites")
     private var channelAdapter: ChannelCardAdapter? = null
 
     private var isLoadingPlaylist: Boolean = false
@@ -120,7 +118,7 @@ class MainActivity : AppCompatActivity() {
 
         updateDlnaStatusBadge()
         updateLastWatchedPill()
-        rebuildGroupChips()
+        rebuildGroupChips(emptyList())
         setupListeners()
 
         val activeUrl = resolveHiddenPlaylistUrl()
@@ -325,7 +323,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(headerRow)
 
         val searchBox = EditText(this).apply {
-            hint = "Hindi, Bhojpuri ya Bengali News khojein..."
+            hint = "Channel, language ya group khojein..."
             setHintTextColor(Color.parseColor(TEXT_SECONDARY))
             setTextColor(Color.parseColor(TEXT_PRIMARY))
             textSize = 14f
@@ -580,10 +578,10 @@ class MainActivity : AppCompatActivity() {
             if (fetched.isNotEmpty()) {
                 markPlaylistRefreshedNow()
                 allChannels = fetched
-                if (!FILTER_TABS.any { it.equals(selectedGroup, ignoreCase = true) }) {
+                rebuildGroupChips(fetched)
+                if (!availableTabs.any { it.equals(selectedGroup, ignoreCase = true) }) {
                     selectedGroup = "All"
                 }
-                rebuildGroupChips()
                 applyFilters()
                 if (showToast) {
                     Toast.makeText(
@@ -593,7 +591,7 @@ class MainActivity : AppCompatActivity() {
                     ).show()
                 }
             } else if (allChannels.isEmpty()) {
-                tvChannelCount?.text = "Filtered channels nahi mile"
+                tvChannelCount?.text = "Channels load nahi ho paye"
                 if (showToast) {
                     Toast.makeText(
                         this@MainActivity,
@@ -611,11 +609,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun rebuildGroupChips() {
+    private fun rebuildGroupChips(channels: List<IptvChannel>) {
         val container = groupContainer ?: return
         container.removeAllViews()
 
-        for (groupName in FILTER_TABS) {
+        val dynamicGroups = channels
+            .mapNotNull { ch ->
+                when {
+                    ch.language.isNotBlank() -> ch.language.trim()
+                    ch.group.isNotBlank() && !ch.group.equals("All", ignoreCase = true) -> ch.group.trim()
+                    else -> null
+                }
+            }
+            .distinct()
+            .take(30)
+
+        availableTabs = buildList {
+            add("All")
+            add("Favorites")
+            addAll(dynamicGroups)
+        }
+
+        for (groupName in availableTabs) {
             val isSelected = selectedGroup.equals(groupName, ignoreCase = true)
             val chip = TextView(this).apply {
                 text = if (groupName == "Favorites") "★ Favorites" else groupName
@@ -642,7 +657,7 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = lp
                 setOnClickListener {
                     selectedGroup = groupName
-                    rebuildGroupChips()
+                    rebuildGroupChips(allChannels)
                     applyFilters()
                 }
             }
@@ -655,15 +670,15 @@ class MainActivity : AppCompatActivity() {
 
         val filtered = allChannels
             .filter { ch ->
-                val category = M3uPlaylistParser.resolveCategory(ch) ?: return@filter false
                 val groupMatch = when {
                     selectedGroup.equals("All", ignoreCase = true) -> true
                     selectedGroup.equals("Favorites", ignoreCase = true) -> favoriteUrls.contains(ch.url)
-                    else -> category.equals(selectedGroup, ignoreCase = true)
+                    else -> ch.language.equals(selectedGroup, ignoreCase = true) ||
+                        ch.group.equals(selectedGroup, ignoreCase = true)
                 }
                 val queryMatch = q.isEmpty() ||
                     ch.name.lowercase(Locale.US).contains(q) ||
-                    category.lowercase(Locale.US).contains(q) ||
+                    ch.language.lowercase(Locale.US).contains(q) ||
                     ch.group.lowercase(Locale.US).contains(q)
                 groupMatch && queryMatch
             }
@@ -968,13 +983,13 @@ class MainActivity : AppCompatActivity() {
                 onLongClick: (IptvChannel) -> Unit
             ) {
                 cancelLogoLoad()
-                val categoryLabel = M3uPlaylistParser.resolveCategory(channel) ?: channel.group
                 titleTv.text = if (fav) "★ ${channel.name}" else channel.name
-                groupTv.text = if (channel.group.isNotBlank() && !channel.group.equals("All", true)) {
-                    "$categoryLabel • ${channel.group}"
-                } else {
-                    categoryLabel
-                }
+                val metaParts = listOfNotNull(
+                    channel.language.trim().takeIf { it.isNotEmpty() },
+                    channel.group.trim().takeIf { it.isNotEmpty() && !it.equals("All", true) }
+                ).distinct()
+                groupTv.text = if (metaParts.isNotEmpty()) metaParts.joinToString(" • ") else "All"
+
                 itemView.setOnClickListener { onClick(channel) }
                 itemView.setOnLongClickListener {
                     onLongClick(channel)
