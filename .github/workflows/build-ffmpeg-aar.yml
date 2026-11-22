@@ -41,6 +41,8 @@ jobs:
           git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git "$JNI_DIR/ffmpeg"
 
           cd "$JNI_DIR"
+          sed -i '/--disable-postproc/d' build_ffmpeg.sh
+
           for abi in arm64-v8a armeabi-v7a; do
             ANDROID_ABI="$abi" ./build_ffmpeg.sh "$MODULE_DIR" "$NDK_DIR" "linux-x86_64" "24"
           done
