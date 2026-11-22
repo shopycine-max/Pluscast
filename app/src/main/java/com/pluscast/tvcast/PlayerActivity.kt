@@ -39,7 +39,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.launch
@@ -535,27 +537,41 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun initPlayer(url: String) {
         releasePlayer()
-        val exo = ExoPlayer.Builder(this).build().apply {
-            val item = MediaItem.fromUri(Uri.parse(url))
-            setMediaItem(item)
-            prepare()
-            playWhenReady = true
-            addListener(object : Player.Listener {
-                override fun onPlaybackStateChanged(playbackState: Int) {
-                    progressBar?.visibility =
-                        if (playbackState == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
-                }
 
-                override fun onPlayerError(error: PlaybackException) {
-                    progressBar?.visibility = View.GONE
-                    Toast.makeText(
-                        this@PlayerActivity,
-                        "Stream play nahi ho paya: ${error.errorCodeName}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            })
-        }
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent("PlusCast/1.0 (Android; IPTV)")
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(25_000)
+            .setAllowCrossProtocolRedirects(true)
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(this)
+            .setDataSourceFactory(httpDataSourceFactory)
+
+        val exo = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build()
+            .apply {
+                val item = MediaItem.fromUri(Uri.parse(url))
+                setMediaItem(item)
+                prepare()
+                playWhenReady = true
+                addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        progressBar?.visibility =
+                            if (playbackState == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        progressBar?.visibility = View.GONE
+                        Toast.makeText(
+                            this@PlayerActivity,
+                            "Stream unavailable (${error.errorCodeName})",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                })
+            }
+
         player = exo
         playerView?.player = exo
     }
