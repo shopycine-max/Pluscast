@@ -35,11 +35,14 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.LifecycleCoroutineScope
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
@@ -51,14 +54,18 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val PREFS_NAME = "pluscast_iptv_prefs"
         private const val KEY_PLAYLIST_URL = "last_playlist_url"
+        private const val KEY_LAST_REFRESH_MS = "last_playlist_refresh_ms"
 
-        // Minimum gap between automatic resume refreshes (5 minutes)
-        private const val AUTO_REFRESH_COOLDOWN_MS = 5 * 60 * 1000L
+        // Daily auto-refresh interval (24 hours)
+        private const val DAILY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
 
         // India IPTV M3U playlist link (UI mein kahin nahi dikhega)
         private const val DEFAULT_PLAYLIST_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
 
-        // Refined Dark Broadcast / TV Palette
+        // Allowed filter chips
+        private val FILTER_TABS = listOf("All", "Hindi", "Bhojpuri", "Bengali News")
+
+        // Dark Broadcast / TV Palette
         private const val BG_PRIMARY = "#070B12"
         private const val BG_GRADIENT_TOP = "#0D1524"
         private const val BG_SURFACE = "#101826"
@@ -88,8 +95,7 @@ class MainActivity : AppCompatActivity() {
     private var channelAdapter: ChannelCardAdapter? = null
 
     private var isLoadingPlaylist: Boolean = false
-    private var lastPlaylistFetchAtMs: Long = 0L
-    private var hasCompletedInitialLoad: Boolean = false
+    private var dailyTickerJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -104,11 +110,13 @@ class MainActivity : AppCompatActivity() {
         applySystemBarInsets(rootView)
 
         updateDlnaStatusBadge()
+        rebuildGroupChips()
         setupListeners()
 
         val activeUrl = resolveHiddenPlaylistUrl()
         if (activeUrl.isNotEmpty()) {
-            loadPlaylist(activeUrl, showToast = true)
+            loadPlaylist(activeUrl, force = true, showToast = true)
+            startDailyAutoRefreshLoop()
         } else {
             tvChannelCount?.text = "Playlist link configure karein"
         }
@@ -118,14 +126,46 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         updateDlnaStatusBadge()
 
-        if (!hasCompletedInitialLoad) return
         val activeUrl = resolveHiddenPlaylistUrl()
-        if (activeUrl.isEmpty() || isLoadingPlaylist) return
-
-        val elapsed = System.currentTimeMillis() - lastPlaylistFetchAtMs
-        if (allChannels.isEmpty() || elapsed >= AUTO_REFRESH_COOLDOWN_MS) {
-            loadPlaylist(activeUrl, showToast = false)
+        if (activeUrl.isNotEmpty() && !isLoadingPlaylist) {
+            val dueDaily = isDailyRefreshDue()
+            if (allChannels.isEmpty() || dueDaily) {
+                loadPlaylist(activeUrl, force = allChannels.isEmpty(), showToast = false)
+            }
         }
+    }
+
+    override fun onDestroy() {
+        dailyTickerJob?.cancel()
+        dailyTickerJob = null
+        super.onDestroy()
+    }
+
+    private fun startDailyAutoRefreshLoop() {
+        dailyTickerJob?.cancel()
+        dailyTickerJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(60 * 60 * 1000L) // Check every hour while app stays open
+                val activeUrl = resolveHiddenPlaylistUrl()
+                if (activeUrl.isNotEmpty() && !isLoadingPlaylist && isDailyRefreshDue()) {
+                    loadPlaylist(activeUrl, force = true, showToast = false)
+                }
+            }
+        }
+    }
+
+    private fun isDailyRefreshDue(): Boolean {
+        val lastMs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getLong(KEY_LAST_REFRESH_MS, 0L)
+        if (lastMs <= 0L) return true
+        return (System.currentTimeMillis() - lastMs) >= DAILY_REFRESH_INTERVAL_MS
+    }
+
+    private fun markPlaylistRefreshedNow() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_LAST_REFRESH_MS, System.currentTimeMillis())
+            .apply()
     }
 
     private fun applySystemBarInsets(root: View) {
@@ -235,7 +275,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(headerRow)
 
         val searchBox = EditText(this).apply {
-            hint = "Channel ya group khojein..."
+            hint = "Hindi, Bhojpuri ya Bengali News khojein..."
             setHintTextColor(Color.parseColor(TEXT_SECONDARY))
             setTextColor(Color.parseColor(TEXT_PRIMARY))
             textSize = 14f
@@ -308,6 +348,7 @@ class MainActivity : AppCompatActivity() {
 
         val fallbackLogo = createLogoDrawable()
         val adapter = ChannelCardAdapter(
+            lifecycleScope = lifecycleScope,
             fallbackDrawable = fallbackLogo,
             onClick = { channel -> openChannelInPlayer(channel) }
         )
@@ -334,7 +375,7 @@ class MainActivity : AppCompatActivity() {
         btnRefresh?.setOnClickListener {
             val url = resolveHiddenPlaylistUrl()
             if (url.isNotEmpty()) {
-                loadPlaylist(url, showToast = true)
+                loadPlaylist(url, force = true, showToast = true)
             } else {
                 Toast.makeText(this, "DEFAULT_PLAYLIST_URL set nahi hai", Toast.LENGTH_SHORT).show()
             }
@@ -406,11 +447,11 @@ class MainActivity : AppCompatActivity() {
         return getSavedPlaylistUrl()
     }
 
-    private fun loadPlaylist(url: String, showToast: Boolean) {
+    private fun loadPlaylist(url: String, force: Boolean, showToast: Boolean) {
         if (isLoadingPlaylist) return
-        isLoadingPlaylist = true
-        lastPlaylistFetchAtMs = System.currentTimeMillis()
+        if (!force && allChannels.isNotEmpty() && !isDailyRefreshDue()) return
 
+        isLoadingPlaylist = true
         progressBar?.visibility = View.VISIBLE
         btnRefresh?.isEnabled = false
         if (allChannels.isEmpty()) {
@@ -422,14 +463,16 @@ class MainActivity : AppCompatActivity() {
             if (isFinishing || isDestroyed) return@launch
 
             isLoadingPlaylist = false
-            hasCompletedInitialLoad = true
             progressBar?.visibility = View.GONE
             btnRefresh?.isEnabled = true
 
             if (fetched.isNotEmpty()) {
+                markPlaylistRefreshedNow()
                 allChannels = fetched
-                selectedGroup = "All"
-                rebuildGroupChips(fetched)
+                if (!FILTER_TABS.any { it.equals(selectedGroup, ignoreCase = true) }) {
+                    selectedGroup = "All"
+                }
+                rebuildGroupChips()
                 applyFilters()
                 if (showToast) {
                     Toast.makeText(
@@ -439,7 +482,7 @@ class MainActivity : AppCompatActivity() {
                     ).show()
                 }
             } else if (allChannels.isEmpty()) {
-                tvChannelCount?.text = "Channels load nahi ho paye"
+                tvChannelCount?.text = "Filtered channels nahi mile"
                 if (showToast) {
                     Toast.makeText(
                         this@MainActivity,
@@ -457,20 +500,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun rebuildGroupChips(channels: List<IptvChannel>) {
+    private fun rebuildGroupChips() {
         val container = groupContainer ?: return
         container.removeAllViews()
 
-        val groups = buildList {
-            add("All")
-            channels.map { it.group.trim() }
-                .filter { it.isNotEmpty() && !it.equals("All", ignoreCase = true) }
-                .distinct()
-                .take(20)
-                .forEach { add(it) }
-        }
-
-        for (groupName in groups) {
+        for (groupName in FILTER_TABS) {
             val isSelected = selectedGroup.equals(groupName, ignoreCase = true)
             val chip = TextView(this).apply {
                 text = groupName
@@ -494,7 +528,7 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = lp
                 setOnClickListener {
                     selectedGroup = groupName
-                    rebuildGroupChips(allChannels)
+                    rebuildGroupChips()
                     applyFilters()
                 }
             }
@@ -506,10 +540,12 @@ class MainActivity : AppCompatActivity() {
         val q = etSearch?.text?.toString()?.trim()?.lowercase(Locale.US).orEmpty()
 
         val filtered = allChannels.filter { ch ->
+            val category = M3uPlaylistParser.resolveCategory(ch) ?: return@filter false
             val groupMatch = selectedGroup.equals("All", ignoreCase = true) ||
-                ch.group.equals(selectedGroup, ignoreCase = true)
+                category.equals(selectedGroup, ignoreCase = true)
             val queryMatch = q.isEmpty() ||
                 ch.name.lowercase(Locale.US).contains(q) ||
+                category.lowercase(Locale.US).contains(q) ||
                 ch.group.lowercase(Locale.US).contains(q)
             groupMatch && queryMatch
         }
@@ -588,7 +624,6 @@ class MainActivity : AppCompatActivity() {
         canvas.drawRoundRect(rect, corner, corner, bgPaint)
         canvas.drawRoundRect(rect, corner, corner, borderPaint)
 
-        // Broadcast play mark
         val playPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor(ACCENT_CYAN)
             style = Paint.Style.FILL
@@ -604,7 +639,6 @@ class MainActivity : AppCompatActivity() {
         }
         canvas.drawPath(playPath, playPaint)
 
-        // Subtle gold live dot at top-right
         val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor(ACCENT_GOLD)
             style = Paint.Style.FILL
@@ -627,6 +661,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private class ChannelCardAdapter(
+        private val lifecycleScope: LifecycleCoroutineScope,
         private val fallbackDrawable: Drawable,
         private val onClick: (IptvChannel) -> Unit
     ) : RecyclerView.Adapter<ChannelCardAdapter.ChannelViewHolder>() {
@@ -739,7 +774,12 @@ class MainActivity : AppCompatActivity() {
 
         override fun onBindViewHolder(holder: ChannelViewHolder, position: Int) {
             val item = items[position]
-            holder.bind(item, fallbackDrawable, logoCache, onClick)
+            holder.bind(item, lifecycleScope, fallbackDrawable, logoCache, onClick)
+        }
+
+        override fun onViewRecycled(holder: ChannelViewHolder) {
+            holder.cancelLogoLoad()
+            super.onViewRecycled(holder)
         }
 
         override fun getItemCount(): Int = items.size
@@ -753,15 +793,26 @@ class MainActivity : AppCompatActivity() {
 
             private var loadJob: Job? = null
 
+            fun cancelLogoLoad() {
+                loadJob?.cancel()
+                loadJob = null
+            }
+
             fun bind(
                 channel: IptvChannel,
+                scope: LifecycleCoroutineScope,
                 fallbackDrawable: Drawable,
                 logoCache: LruCache<String, Bitmap>,
                 onClick: (IptvChannel) -> Unit
             ) {
-                loadJob?.cancel()
+                cancelLogoLoad()
+                val categoryLabel = M3uPlaylistParser.resolveCategory(channel) ?: channel.group
                 titleTv.text = channel.name
-                groupTv.text = channel.group
+                groupTv.text = if (channel.group.isNotBlank() && !channel.group.equals("All", true)) {
+                    "$categoryLabel • ${channel.group}"
+                } else {
+                    categoryLabel
+                }
                 itemView.setOnClickListener { onClick(channel) }
 
                 val logoUrl = channel.logoUrl.trim()
@@ -782,7 +833,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 logoIv.setImageDrawable(fallbackDrawable)
-                loadJob = kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+                loadJob = scope.launch(Dispatchers.IO) {
                     val bmp = downloadScaledLogo(logoUrl, 96, 96)
                     if (bmp != null) {
                         logoCache.put(logoUrl, bmp)
