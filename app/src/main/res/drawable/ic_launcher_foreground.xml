@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Subtle inner badge surface -->
+    <path
+        android:fillColor="#102536"
+        android:pathData="M30,30 L78,30 A8,8 0 0,1 86,38 L86,70 A8,8 0 0,1 78,78 L30,78 A8,8 0 0,1 22,70 L22,38 A8,8 0 0,1 30,30 Z" />
+
+    <!-- Crisp cyan frame border -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M30,30 L78,30 A8,8 0 0,1 86,38 L86,70 A8,8 0 0,1 78,78 L30,78 A8,8 0 0,1 22,70 L22,38 A8,8 0 0,1 30,30 Z"
+        android:strokeWidth="2.5"
+        android:strokeColor="#00E5FF" />
+
+    <!-- Play triangle -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M46,42 L68,54 L46,66 Z" />
+
+    <!-- Subtle top-right cast/signal arcs -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M67,35 A8,8 0 0,1 81,35"
+        android:strokeWidth="2.2"
+        android:strokeColor="#00E5FF"
+        android:strokeLineCap="round" />
+
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M70,39 A4,4 0 0,1 78,39"
+        android:strokeWidth="2.2"
+        android:strokeColor="#00E5FF"
+        android:strokeLineCap="round" />
+</vector>
