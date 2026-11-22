@@ -2,8 +2,10 @@ package com.pluscast.tvcast
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
@@ -14,14 +16,19 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class YouTubeActivity : AppCompatActivity() {
 
     private var webView: WebView? = null
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    private val dlnaController by lazy { DlnaController(this) }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -128,9 +135,87 @@ class YouTubeActivity : AppCompatActivity() {
                     Toast.makeText(this, "YouTube link ya search text dalein", Toast.LENGTH_SHORT).show()
                 }
             }
+
+            addDlnaCastButton()
         } catch (e: Exception) {
             e.printStackTrace()
             Toast.makeText(this, "YouTube player error: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun addDlnaCastButton() {
+        try {
+            val rootView = findViewById<ViewGroup>(android.R.id.content)
+            val sizePx = (48 * resources.displayMetrics.density).toInt()
+            val marginPx = (16 * resources.displayMetrics.density).toInt()
+
+            val castBtn = ImageButton(this).apply {
+                setImageResource(android.R.drawable.stat_sys_data_bluetooth)
+                setColorFilter(Color.parseColor("#00E5FF"))
+                setBackgroundColor(Color.parseColor("#CC0F172A"))
+                contentDescription = "Cast to DLNA"
+                elevation = 16f
+                layoutParams = FrameLayout.LayoutParams(sizePx, sizePx).apply {
+                    gravity = Gravity.BOTTOM or Gravity.END
+                    bottomMargin = marginPx
+                    rightMargin = marginPx
+                }
+                setOnClickListener {
+                    castCurrentUrlToDlna()
+                }
+            }
+            rootView.addView(castBtn)
+            castBtn.bringToFront()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun castCurrentUrlToDlna() {
+        val currentUrl = webView?.url.orEmpty()
+        if (currentUrl.isBlank()) {
+            Toast.makeText(this, "Koi URL load nahi hai", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        Toast.makeText(this, "DLNA devices khoj raha hai...", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            val devices = dlnaController.discoverRenderers()
+            if (isFinishing || isDestroyed) return@launch
+
+            if (devices.isEmpty()) {
+                Toast.makeText(
+                    this@YouTubeActivity,
+                    "Koi DLNA device nahi mila",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            val names = devices.map { it.friendlyName }.toTypedArray()
+            AlertDialog.Builder(this@YouTubeActivity)
+                .setTitle("DLNA Device Chunein")
+                .setItems(names) { _, which ->
+                    val selected = devices[which]
+                    val title = webView?.title?.takeIf { it.isNotBlank() } ?: "YouTube Cast"
+                    lifecycleScope.launch {
+                        val res = dlnaController.playMediaOnDevice(
+                            device = selected,
+                            mediaUrl = currentUrl,
+                            title = title,
+                            mimeType = "video/mp4"
+                        )
+                        if (isFinishing || isDestroyed) return@launch
+                        Toast.makeText(
+                            this@YouTubeActivity,
+                            if (res.success) "${selected.friendlyName} par bheja gaya (YouTube web URL STB par play na ho to direct stream chahiye)"
+                            else "DLNA fail: ${res.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
         }
     }
 
