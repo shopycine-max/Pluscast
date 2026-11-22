@@ -52,11 +52,12 @@ class PlayerActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_MEDIA_URL = "extra_media_url"
         const val EXTRA_MEDIA_TITLE = "extra_media_title"
+        const val EXTRA_MEDIA_USER_AGENT = "extra_media_user_agent"
+        const val EXTRA_MEDIA_REFERRER = "extra_media_referrer"
 
         private const val AUTO_HIDE_DELAY_MS = 1600L
 
         private const val BG_PLAYER = "#05080F"
-        private const val BG_BAR = "#101826"
         private const val BG_BADGE = "#12243B"
         private const val BORDER_BAR = "#22324F"
         private const val ACCENT_CYAN = "#00E5FF"
@@ -80,6 +81,8 @@ class PlayerActivity : AppCompatActivity() {
 
     private var mediaUrl: String = ""
     private var mediaTitle: String = "PlusCast IPTV"
+    private var mediaUserAgent: String = ""
+    private var mediaReferrer: String = ""
     private var isScreenLocked: Boolean = false
     private var zoomModeIndex: Int = 0
     private var selectedDlnaDevice: DlnaDevice? = null
@@ -113,6 +116,14 @@ class PlayerActivity : AppCompatActivity() {
             ?: intent.getStringExtra(EXTRA_MEDIA_TITLE)?.trim()
                 ?.takeIf { it.isNotEmpty() }
             ?: "PlusCast IPTV"
+
+        mediaUserAgent = intent.getStringExtra("MEDIA_USER_AGENT")?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: intent.getStringExtra(EXTRA_MEDIA_USER_AGENT)?.trim().orEmpty()
+
+        mediaReferrer = intent.getStringExtra("MEDIA_REFERRER")?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: intent.getStringExtra(EXTRA_MEDIA_REFERRER)?.trim().orEmpty()
 
         val savedName = intent.getStringExtra("DLNA_DEVICE_NAME")?.trim().orEmpty()
         val savedCtrl = intent.getStringExtra("DLNA_CONTROL_URL")?.trim().orEmpty()
@@ -173,6 +184,7 @@ class PlayerActivity : AppCompatActivity() {
     private fun blinkControlsOnTouch() {
         if (isScreenLocked) {
             unlockPillView?.let { pill ->
+                pill.animate().cancel()
                 pill.visibility = View.VISIBLE
                 pill.alpha = 0.25f
                 pill.animate().alpha(1f).setDuration(130L).start()
@@ -306,7 +318,7 @@ class PlayerActivity : AppCompatActivity() {
             )
         }
 
-        // useController = false so no full-screen controller bar line overlays the video
+        // useController = false so no full-width controller line overlays the video
         val pv = PlayerView(this).apply {
             useController = false
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -364,7 +376,7 @@ class PlayerActivity : AppCompatActivity() {
         progressBar = spinner
         root.addView(spinner)
 
-        // Compact floating controls only (no full-width line across screen)
+        // Compact floating controls only (no full-width bar/line across screen)
         val controlsCluster = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -522,6 +534,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun blinkView(v: View) {
+        v.animate().cancel()
         v.alpha = 0.25f
         v.animate().alpha(1f).setDuration(130L).start()
     }
@@ -538,8 +551,17 @@ class PlayerActivity : AppCompatActivity() {
     private fun initPlayer(url: String) {
         releasePlayer()
 
+        val effectiveUa = mediaUserAgent.ifEmpty { "PlusCast/1.0 (Android; IPTV)" }
+        val headers = buildMap {
+            put("User-Agent", effectiveUa)
+            if (mediaReferrer.isNotEmpty()) {
+                put("Referer", mediaReferrer)
+            }
+        }
+
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("PlusCast/1.0 (Android; IPTV)")
+            .setUserAgent(effectiveUa)
+            .setDefaultRequestProperties(headers)
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(25_000)
             .setAllowCrossProtocolRedirects(true)
