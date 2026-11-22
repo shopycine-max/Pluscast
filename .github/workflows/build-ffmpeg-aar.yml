@@ -47,8 +47,6 @@ jobs:
             ANDROID_ABI="$abi" ./build_ffmpeg.sh "$MODULE_DIR" "$NDK_DIR" "linux-x86_64" "24"
           done
 
-          find "$MODULE_DIR" -name "*.a" -o -name "*.so" | sort
-
           cd "$GITHUB_WORKSPACE/media3"
           set +e
           ./gradlew :lib-decoder-ffmpeg:bundleReleaseAar --no-daemon > "$HOME/gradle.log" 2>&1
@@ -56,10 +54,8 @@ jobs:
           set -e
 
           if [ $EXIT_CODE -ne 0 ]; then
-            echo "=== EXACT COMPILER / LINKER ERRORS ==="
-            grep -n -E "error:|undefined reference|CMake Error|No such file or directory" "$HOME/gradle.log" | tail -n 40
-            echo "=== LAST 40 LINES ==="
-            tail -n 40 "$HOME/gradle.log"
+            echo "=== LINKER UNDEFINED SYMBOLS ==="
+            grep -B 15 "error: linker command failed" "$HOME/gradle.log" | tail -n 25
             exit $EXIT_CODE
           fi
 
