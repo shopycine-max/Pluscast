@@ -111,7 +111,6 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(16), dp(24), dp(16), dp(12))
         }
 
-        // 1. Header Bar
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -146,7 +145,7 @@ class MainActivity : AppCompatActivity() {
             text = "DLNA: Scan"
             setTextColor(Color.parseColor(ACCENT_CYAN))
             textSize = 12f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.MEDIUM)
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             background = createPillDrawable(
                 fillHex = "#102536",
                 strokeHex = "#1E4966",
@@ -183,13 +182,12 @@ class MainActivity : AppCompatActivity() {
         headerRow.addView(refreshBtn)
         root.addView(headerRow)
 
-        // 2. Search Bar
         val searchBox = EditText(this).apply {
             hint = "Channel ya group khojein..."
             setHintTextColor(Color.parseColor(TEXT_SECONDARY))
             setTextColor(Color.parseColor(TEXT_PRIMARY))
             textSize = 14f
-            singleLine = true
+            setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT
             background = createPillDrawable(
                 fillHex = BG_SURFACE,
@@ -207,7 +205,6 @@ class MainActivity : AppCompatActivity() {
         etSearch = searchBox
         root.addView(searchBox)
 
-        // 3. Group Filter Chips
         val groupScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             val lp = LinearLayout.LayoutParams(
@@ -225,7 +222,6 @@ class MainActivity : AppCompatActivity() {
         groupScroll.addView(chipsRow)
         root.addView(groupScroll)
 
-        // 4. Status + Count + Progress Row
         val metaRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -242,7 +238,7 @@ class MainActivity : AppCompatActivity() {
             text = "Channels: 0"
             setTextColor(Color.parseColor(TEXT_SECONDARY))
             textSize = 12.5f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.MEDIUM)
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         tvChannelCount = countView
@@ -258,7 +254,6 @@ class MainActivity : AppCompatActivity() {
         metaRow.addView(spinner)
         root.addView(metaRow)
 
-        // 5. Channels RecyclerView
         val adapter = ChannelCardAdapter { channel ->
             openChannelInPlayer(channel)
         }
