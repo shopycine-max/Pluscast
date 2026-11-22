@@ -25,8 +25,10 @@ import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -410,12 +412,24 @@ class PlayerActivity : AppCompatActivity() {
         try {
             val httpDataSourceFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent("PlusCast/1.0 (Android)")
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(20_000)
                 .setAllowCrossProtocolRedirects(true)
 
             val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
 
             val mediaSourceFactory = DefaultMediaSourceFactory(this)
                 .setDataSourceFactory(dataSourceFactory)
+
+            val loadControl: LoadControl = DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    15_000, // minBufferMs
+                    50_000, // maxBufferMs
+                    2_500,  // bufferForPlaybackMs
+                    5_000   // bufferForPlaybackAfterRebufferMs
+                )
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build()
 
             val audioAttributes = AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA)
@@ -427,6 +441,7 @@ class PlayerActivity : AppCompatActivity() {
 
             val exoPlayer = ExoPlayer.Builder(this, renderersFactory)
                 .setMediaSourceFactory(mediaSourceFactory)
+                .setLoadControl(loadControl)
                 .setAudioAttributes(audioAttributes, true)
                 .setHandleAudioBecomingNoisy(true)
                 .build()
