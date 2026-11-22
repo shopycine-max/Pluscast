@@ -5,48 +5,56 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Outer broadcast bezel -->
-    <path
-        android:fillColor="#0B1322"
-        android:pathData="M24,26 L84,26 A6,6 0 0,1 90,32 L90,72 A6,6 0 0,1 84,78 L24,78 A6,6 0 0,1 18,72 L18,32 A6,6 0 0,1 24,26 Z"
-        android:strokeColor="#00E5FF"
-        android:strokeWidth="3.2" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.72"
+        android:scaleY="0.72">
 
-    <!-- Clean live signal arc on top-left inside bezel -->
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M27,41 A12,12 0 0,1 39,53"
-        android:strokeColor="#38BDF8"
-        android:strokeLineCap="round"
-        android:strokeWidth="2.4" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M27,34 A19,19 0 0,1 46,53"
-        android:strokeColor="#38BDF8"
-        android:strokeLineCap="round"
-        android:strokeWidth="2.4" />
+        <!-- TV / Cast Screen Fill -->
+        <path
+            android:fillColor="#09111E"
+            android:pathData="M23,27h62a4,4 0 0,1 4,4v38a4,4 0 0,1 -4,4h-62a4,4 0 0,1 -4,-4v-38a4,4 0 0,1 4,-4z" />
 
-    <!-- Sharp broadcast play mark -->
-    <path
-        android:fillColor="#00E5FF"
-        android:pathData="M48,40 L70,52 L48,64 Z" />
+        <!-- TV / Cast Screen Border -->
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M23,27h62a4,4 0 0,1 4,4v38a4,4 0 0,1 -4,4h-62a4,4 0 0,1 -4,-4v-38a4,4 0 0,1 4,-4z"
+            android:strokeColor="#00E5FF"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:strokeWidth="4.2" />
 
-    <!-- Gold live indicator dot -->
-    <path
-        android:fillColor="#FBBF24"
-        android:pathData="M78,35 A3.5,3.5 0 1,1 77.99,35 Z" />
+        <!-- Cast / Signal Arcs -->
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M30,54a10,10 0 0,1 10,-10"
+            android:strokeColor="#38BDF8"
+            android:strokeLineCap="round"
+            android:strokeWidth="3.2" />
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M30,47a17,17 0 0,1 17,-17"
+            android:strokeColor="#38BDF8"
+            android:strokeLineCap="round"
+            android:strokeWidth="3.2" />
 
-    <!-- Broadcast stand base -->
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M42,84 L66,84"
-        android:strokeColor="#00E5FF"
-        android:strokeLineCap="round"
-        android:strokeWidth="3.0" />
-    <path
-        android:fillColor="@android:color/transparent"
-        android:pathData="M54,78 L54,84"
-        android:strokeColor="#00E5FF"
-        android:strokeLineCap="round"
-        android:strokeWidth="3.0" />
+        <!-- Center Play Triangle -->
+        <path
+            android:fillColor="#00E5FF"
+            android:pathData="M50,40l20,10l-20,10z" />
+
+        <!-- Live Gold Dot -->
+        <path
+            android:fillColor="#FBBF24"
+            android:pathData="M76,36m-4,0a4,4 0 1,0 8,0a4,4 0 1,0 -8,0" />
+
+        <!-- Broadcast Stand -->
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M54,73v9M41,82h26"
+            android:strokeColor="#00E5FF"
+            android:strokeLineCap="round"
+            android:strokeWidth="4.0" />
+    </group>
 </vector>
