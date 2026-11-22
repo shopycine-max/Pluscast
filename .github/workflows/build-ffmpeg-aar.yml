@@ -46,6 +46,7 @@ jobs:
           python3 - <<'EOF'
           from pathlib import Path
 
+          # 1. Fix Android stderr macro conflict in FFmpeg log.c
           log_c = Path("ffmpeg/libavutil/log.c")
           text = log_c.read_text(encoding="utf-8")
 
@@ -65,10 +66,42 @@ jobs:
               else:
                   text = guard + "\n" + text
               log_c.write_text(text, encoding="utf-8")
+
+          # 2. Explicitly enable mp2 / mp2float and requested decoders in build_ffmpeg.sh
+          script_path = Path("build_ffmpeg.sh")
+          script_text = script_path.read_text(encoding="utf-8")
+
+          extra_flags = (
+              " \\\n"
+              "  --enable-decoder=mp2 \\\n"
+              "  --enable-decoder=mp2float \\\n"
+              "  --enable-decoder=mp3 \\\n"
+              "  --enable-decoder=ac3 \\\n"
+              "  --enable-decoder=eac3 \\\n"
+              "  --enable-decoder=dca"
+          )
+
+          if "--enable-decoder=mp2" not in script_text:
+              if "--disable-everything" in script_text:
+                  script_text = script_text.replace(
+                      "--disable-everything",
+                      "--disable-everything" + extra_flags,
+                      1,
+                  )
+              elif "--enable-decoders" in script_text:
+                  script_text = script_text.replace(
+                      "--enable-decoders",
+                      extra_flags.lstrip() + " \\\n  --enable-decoders",
+                      1,
+                  )
+
+          script_path.write_text(script_text, encoding="utf-8")
           EOF
 
           for abi in arm64-v8a armeabi-v7a; do
             ANDROID_ABI="$abi" ./build_ffmpeg.sh "$MODULE_DIR" "$NDK_DIR" "linux-x86_64" "24"
+            echo "=== Checking MP2 decoder config for $abi ==="
+            grep -E "CONFIG_MP2_DECODER|CONFIG_MP2FLOAT_DECODER" "$JNI_DIR/ffmpeg/ffbuild/config.h" || true
           done
 
           cd "$GITHUB_WORKSPACE/media3"
