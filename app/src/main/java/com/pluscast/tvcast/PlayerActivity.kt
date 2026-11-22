@@ -38,7 +38,7 @@ class PlayerActivity : AppCompatActivity() {
     private var mediaTitle: String = "PlusCast Media"
     private var isCastingToTv: Boolean = false
     private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = ZOOM
-    private val dlnaController = DlnaController()
+    private val dlnaController by lazy { DlnaController(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
