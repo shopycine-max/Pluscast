@@ -1,6 +1,5 @@
 package com.pluscast.tvcast
 
-import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
@@ -24,6 +23,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.decoder.ffmpeg.FfmpegLibrary
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -43,7 +43,6 @@ class PlayerActivity : AppCompatActivity() {
     private var mediaTitle: String = "PlusCast Media"
     private var isCastingToTv: Boolean = false
     private var resizeModeIndex: Int = 0 // 0 = FIT (default), 1 = ZOOM
-    private var hasShownAudioFallbackDialog: Boolean = false
     private val dlnaController by lazy { DlnaController(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -290,8 +289,6 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun initializePlayer() {
         try {
-            hasShownAudioFallbackDialog = false
-
             val dataSourceFactory = DefaultHttpDataSource.Factory()
                 .setUserAgent("PlusCast/1.0 (Android)")
                 .setAllowCrossProtocolRedirects(true)
@@ -345,16 +342,13 @@ class PlayerActivity : AppCompatActivity() {
                             Toast.LENGTH_SHORT
                         ).show()
                     } else if (!hasSupportedAudio) {
+                        val ffmpegReady = FfmpegLibrary.isAvailable()
                         val codecsText = audioMimeTypes.distinct().joinToString()
                         Toast.makeText(
                             this@PlayerActivity,
-                            "Unsupported audio codec: $codecsText",
+                            "FFmpeg available: $ffmpegReady | Codec: $codecsText",
                             Toast.LENGTH_LONG
                         ).show()
-                        promptOpenInExternalPlayer(
-                            url = mediaUrl,
-                            reason = "Audio codec ($codecsText) is app mein decode nahi ho pa raha."
-                        )
                     }
                 }
 
@@ -374,33 +368,6 @@ class PlayerActivity : AppCompatActivity() {
         } catch (e: Exception) {
             e.printStackTrace()
             Toast.makeText(this, "Player error: ${e.message}", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun promptOpenInExternalPlayer(url: String, reason: String) {
-        if (isFinishing || isDestroyed || hasShownAudioFallbackDialog) return
-        hasShownAudioFallbackDialog = true
-
-        AlertDialog.Builder(this)
-            .setTitle("Audio PlusCast Mein Nahi Chal Rahi")
-            .setMessage("$reason\n\nKya aap is channel ko VLC ya kisi external player mein kholna chahte hain?")
-            .setPositiveButton("Open in VLC / Player") { _, _ ->
-                player?.pause()
-                openInExternalPlayer(url)
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun openInExternalPlayer(url: String) {
-        try {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(Uri.parse(url), "video/*")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(Intent.createChooser(intent, "Player chunein"))
-        } catch (_: Exception) {
-            Toast.makeText(this, "External player nahi mila", Toast.LENGTH_SHORT).show()
         }
     }
 
