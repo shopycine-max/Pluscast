@@ -1,5 +1,7 @@
 package com.pluscast.tvcast
 
+import android.content.ActivityNotFoundException
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
@@ -255,7 +257,7 @@ class MainActivity : AppCompatActivity() {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
             R.id.action_cast_youtube -> {
-                showYouTubeCastDialog()
+                triggerDirectYouTubeFlow()
                 true
             }
             R.id.action_cast_local -> {
@@ -273,7 +275,7 @@ class MainActivity : AppCompatActivity() {
         tb.setOnMenuItemClickListener { menuItem ->
             when (menuItem.itemId) {
                 R.id.action_cast_youtube -> {
-                    showYouTubeCastDialog()
+                    triggerDirectYouTubeFlow()
                     true
                 }
                 R.id.action_cast_local -> {
@@ -450,7 +452,7 @@ class MainActivity : AppCompatActivity() {
         tvDlnaStatus = dlnaBadge
 
         val ytCastBadge = TextView(this).apply {
-            text = "▶ YT Cast"
+            text = "▶ YouTube"
             setTextColor(Color.parseColor(ACCENT_RED))
             textSize = 11.5f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
@@ -665,7 +667,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnYouTubeCast?.setOnClickListener {
-            showYouTubeCastDialog()
+            triggerDirectYouTubeFlow()
         }
 
         btnLocalCast?.setOnClickListener {
@@ -693,10 +695,34 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    // ==================== YOUTUBE CASTING ====================
+    // ==================== DIRECT YOUTUBE LAUNCH ====================
 
-    private fun showYouTubeCastDialog() {
+    private fun triggerDirectYouTubeFlow() {
+        val clipText = readClipboardYouTubeInput()
+        if (clipText != null && openYouTubeDirectly(clipText)) {
+            return
+        }
+        showYouTubeDirectInputDialog(prefill = clipText.orEmpty())
+    }
+
+    private fun readClipboardYouTubeInput(): String? {
+        return try {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager
+            val item = clipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+            val text = item?.coerceToText(this)?.toString()?.trim().orEmpty()
+            if (text.isNotEmpty() && M3uPlaylistParser.extractYouTubeVideoId(text) != null) {
+                text
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun showYouTubeDirectInputDialog(prefill: String = "") {
         val input = EditText(this).apply {
+            setText(prefill)
             hint = "YouTube link ya Video ID paste karein..."
             setHintTextColor(Color.parseColor(TEXT_SECONDARY))
             setTextColor(Color.parseColor(TEXT_PRIMARY))
@@ -718,85 +744,62 @@ class MainActivity : AppCompatActivity() {
         }
 
         AlertDialog.Builder(this)
-            .setTitle("YouTube Cast")
-            .setMessage("Video URL ya ID dalein. Connected Cast/DLNA device par cast hoga ya Player khulega.")
+            .setTitle("Direct YouTube Open")
+            .setMessage("YouTube video URL ya ID dalein; yeh seedha YouTube app mein khulega.")
             .setView(wrapper)
-            .setPositiveButton("Cast / Play") { _, _ ->
+            .setPositiveButton("Open YouTube") { _, _ ->
                 val raw = input.text?.toString()?.trim().orEmpty()
-                if (raw.isEmpty()) {
-                    Toast.makeText(this, "Kripya YouTube link ya ID dalein", Toast.LENGTH_SHORT).show()
-                    return@setPositiveButton
-                }
-                val videoId = M3uPlaylistParser.extractYouTubeVideoId(raw)
-                if (videoId == null) {
-                    Toast.makeText(this, "Valid YouTube link ya ID nahi mila", Toast.LENGTH_LONG).show()
-                    return@setPositiveButton
-                }
-                castYouTubeVideo(rawInput = raw, videoId = videoId)
+                openYouTubeDirectly(raw)
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun castYouTubeVideo(rawInput: String, videoId: String) {
-        val normalizedUrl = if (rawInput.startsWith("http://", true) || rawInput.startsWith("https://", true)) {
-            rawInput
-        } else {
-            "https://www.youtube.com/watch?v=$videoId"
+    private fun openYouTubeDirectly(rawInput: String): Boolean {
+        val trimmed = rawInput.trim()
+        if (trimmed.isEmpty()) {
+            Toast.makeText(this, "Kripya YouTube link ya ID dalein", Toast.LENGTH_SHORT).show()
+            return false
         }
-        val title = "YouTube ($videoId)"
 
-        saveLastWatched(url = normalizedUrl, title = title)
+        val videoId = M3uPlaylistParser.extractYouTubeVideoId(trimmed)
+        val watchUrl = when {
+            trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true) -> trimmed
+            videoId != null -> "https://www.youtube.com/watch?v=$videoId"
+            else -> null
+        }
+
+        if (watchUrl == null) {
+            Toast.makeText(this, "Valid YouTube link ya ID nahi mila", Toast.LENGTH_LONG).show()
+            return false
+        }
+
+        val title = videoId?.let { "YouTube ($it)" } ?: "YouTube Video"
+        saveLastWatched(url = watchUrl, title = title)
         updateLastWatchedPill()
 
-        // 1. Try active Google Cast session first if connected
-        if (getActiveCastSession() != null) {
-            val ytRequest = CastOptionsProvider.buildYouTubeMediaLoadRequest(
-                youtubeUrlOrId = normalizedUrl,
-                title = title
-            )
-            if (ytRequest != null) {
-                CastOptionsProvider.loadMediaOnActiveCastSession(this, ytRequest) { ok, msg ->
-                    if (!ok) {
-                        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
+        val uri = Uri.parse(watchUrl)
+        val ytAppIntent = Intent(Intent.ACTION_VIEW, uri).apply {
+            setPackage("com.google.android.youtube")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
 
-        // 2. Try saved DLNA device if available, else launch PlayerActivity
-        val savedDevice = DlnaDeviceStore.getLastDevice(this)
-        if (savedDevice != null) {
-            Toast.makeText(
-                this,
-                "YouTube video ${savedDevice.friendlyName} par bhej rahe hain...",
-                Toast.LENGTH_SHORT
-            ).show()
-            lifecycleScope.launch {
-                val res = dlnaController.playYouTubeOnDevice(
-                    device = savedDevice,
-                    youtubeUrlOrId = normalizedUrl,
-                    title = title
-                )
-                if (isFinishing || isDestroyed) return@launch
-                if (!res.success) {
-                    launchPlayer(
-                        url = normalizedUrl,
-                        title = title,
-                        castMode = CAST_MODE_YOUTUBE,
-                        youtubeUrl = normalizedUrl,
-                        youtubeVideoId = videoId
-                    )
-                }
+        return try {
+            startActivity(ytAppIntent)
+            true
+        } catch (_: ActivityNotFoundException) {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, uri))
+                true
+            } catch (_: Exception) {
+                Toast.makeText(
+                    this,
+                    "YouTube ya browser open nahi ho saka",
+                    Toast.LENGTH_LONG
+                ).show()
+                false
             }
-        } else {
-            launchPlayer(
-                url = normalizedUrl,
-                title = title,
-                castMode = CAST_MODE_YOUTUBE,
-                youtubeUrl = normalizedUrl,
-                youtubeVideoId = videoId
-            )
         }
     }
 
@@ -1188,15 +1191,19 @@ class MainActivity : AppCompatActivity() {
         updateLastWatchedPill()
 
         when (channel.sourceType) {
-            MediaSourceType.YOUTUBE -> launchPlayer(
-                url = channel.url,
-                title = channel.name,
-                userAgent = channel.userAgent,
-                referrer = channel.referrer,
-                castMode = CAST_MODE_YOUTUBE,
-                youtubeUrl = channel.url,
-                youtubeVideoId = channel.youtubeVideoId
-            )
+            MediaSourceType.YOUTUBE -> {
+                if (!openYouTubeDirectly(channel.url)) {
+                    launchPlayer(
+                        url = channel.url,
+                        title = channel.name,
+                        userAgent = channel.userAgent,
+                        referrer = channel.referrer,
+                        castMode = CAST_MODE_YOUTUBE,
+                        youtubeUrl = channel.url,
+                        youtubeVideoId = channel.youtubeVideoId
+                    )
+                }
+            }
             MediaSourceType.LOCAL -> launchPlayer(
                 url = channel.url,
                 title = channel.name,
