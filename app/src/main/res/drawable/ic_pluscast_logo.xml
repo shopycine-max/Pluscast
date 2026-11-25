@@ -13,7 +13,7 @@
     <!-- Subtle Outer Ring -->
     <path
         android:fillColor="#1E293B"
-        android:pathData="M54,14A40,40 0,1 1,14 54A40,40 0,0 1,54 14Z" />
+        android:pathData="M54,16A38,38 0,1 1,16 54A38,38 0,0 1,54 16Z" />
 
     <!-- Standard TV / Display Frame -->
     <path
@@ -49,17 +49,17 @@
 
     <!-- Crisp Play Triangle Inside Screen -->
     <path
-        android:fillColor="#38BDF8"
+        android:fillColor="#00E5FF"
         android:pathData="M49,43L67,53L49,63Z" />
 
     <!-- Clean Plus Badge (Bottom-Right) -->
     <path
         android:fillColor="#0284C7"
-        android:pathData="M76,65m-11,0a11,11 0,1 0,22 0a11,11 0,1 0,-22 0" />
+        android:pathData="M75,65m-10.5,0a10.5,10.5 0,1 0,21 0a10.5,10.5 0,1 0,-21 0" />
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M74.5,60h3v10h-3z" />
+        android:pathData="M73.5,60.2h3v9.6h-3z" />
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M71,63.5h10v3h-10z" />
+        android:pathData="M70.2,63.5h9.6v3h-9.6z" />
 </vector>
