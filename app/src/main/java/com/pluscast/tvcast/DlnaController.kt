@@ -307,8 +307,9 @@ class DlnaController(private val context: Context? = null) {
 
     /**
      * YouTube video ko TV par bhejta hai:
-     * 1) Agar TV par DIAL endpoint (`Application-URL`) hai to YouTube app launch try karta hai.
-     * 2) LAN HTTP redirect endpoint (`http://<ip>:<port>/yt?v=<id>`) aur direct watch URL
+     * 1) Saved/discovered DIAL URL ya TV host ke common DIAL endpoints (8008 / desc XML)
+     *    se `YouTube` app `v=<videoId>` ke saath launch karne ki koshish karta hai.
+     * 2) LAN HTTP redirect endpoint (`http://<ip>:<port>/watch?v=<id>`) aur direct watch URL
      *    ke zariye UPnP AVTransport `SetAVTransportURI` + `Play` try karta hai.
      */
     suspend fun playYouTubeOnDevice(
@@ -317,7 +318,10 @@ class DlnaController(private val context: Context? = null) {
         title: String = "YouTube Video"
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val videoId = extractYouTubeVideoId(youtubeUrlOrId)
-            ?: return@withContext DlnaPlayResult(false, "Invalid YouTube URL ya Video ID")
+            ?: return@withContext DlnaPlayResult(
+                false,
+                "Pehle koi YouTube video open karein (video link/ID nahi mila)"
+            )
 
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         val mobileWatchUrl = "https://m.youtube.com/watch?v=$videoId"
@@ -332,14 +336,16 @@ class DlnaController(private val context: Context? = null) {
         }
         val safeTitle = title.trim().ifEmpty { "YouTube ($videoId)" }
 
-        // 1. DIAL fallback (agar TV DIAL YouTube app support karta hai)
-        if (device.dialAppUrl.isNotBlank() && isValidHttpUrl(device.dialAppUrl)) {
-            if (tryLaunchYouTubeViaDial(device.dialAppUrl, videoId)) {
-                return@withContext DlnaPlayResult(true, "${device.friendlyName} YouTube mein open ho raha hai")
+        val dialCandidates = resolveDialBaseUrls(device)
+        for (dialBase in dialCandidates) {
+            if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
+                return@withContext DlnaPlayResult(
+                    true,
+                    "${device.friendlyName} YouTube app mein open ho raha hai"
+                )
             }
         }
 
-        // 2. Local LAN redirect URL tayyar karein taaki TV ko LAN HTTP endpoint mil sake
         val appContext = context?.applicationContext
         val wifiManager = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
@@ -378,34 +384,85 @@ class DlnaController(private val context: Context? = null) {
 
         return@withContext DlnaPlayResult(
             false,
-            "DLNA YouTube play nahi hua ($lastError) — TV par YouTube app use karein"
+            "TV par direct YouTube launch/play nahi hua ($lastError) — TV ke YouTube app ya Cast button ka upyog karein"
         )
     }
 
-    private fun tryLaunchYouTubeViaDial(dialBaseUrl: String, videoId: String): Boolean {
+    private fun resolveDialBaseUrls(device: DlnaDevice): List<String> {
+        val urls = linkedSetOf<String>()
+        if (device.dialAppUrl.isNotBlank() && isValidHttpUrl(device.dialAppUrl)) {
+            urls.add(device.dialAppUrl.trim().trimEnd('/'))
+        }
+
+        val host = runCatching { URL(device.controlUrl).host }.getOrNull().orEmpty()
+        if (host.isNotBlank()) {
+            val descUrls = listOf(
+                "http://$host:8008/ssdp/device-desc.xml",
+                "http://$host:8060/dial/dd.xml",
+                "http://$host:56789/dial/dd.xml"
+            )
+            for (descUrl in descUrls) {
+                val dialFromHeader = probeDialApplicationUrl(descUrl)
+                if (!dialFromHeader.isNullOrBlank() && isValidHttpUrl(dialFromHeader)) {
+                    urls.add(dialFromHeader.trim().trimEnd('/'))
+                }
+            }
+            urls.add("http://$host:8008/apps")
+            urls.add("http://$host:8008/ws/apps")
+        }
+        return urls.toList()
+    }
+
+    private fun probeDialApplicationUrl(descUrl: String): String? {
         var conn: HttpURLConnection? = null
         return try {
-            val base = dialBaseUrl.trimEnd('/')
-            val launchUrl = URL("$base/YouTube")
-            conn = (launchUrl.openConnection() as HttpURLConnection).apply {
-                connectTimeout = 3000
-                readTimeout = 3000
-                requestMethod = "POST"
-                doOutput = true
+            conn = (URL(descUrl).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 1500
+                readTimeout = 1500
+                requestMethod = "GET"
+                instanceFollowRedirects = true
                 setRequestProperty("User-Agent", USER_AGENT)
-                setRequestProperty("Content-Type", "text/plain; charset=utf-8")
             }
-            val payload = "v=$videoId"
-            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
-                writer.write(payload)
-                writer.flush()
-            }
-            conn.responseCode in 200..204
+            if (conn.responseCode !in 200..299) return null
+            conn.getHeaderField("Application-URL")?.trim()?.takeIf { isValidHttpUrl(it) }
         } catch (_: Exception) {
-            false
+            null
         } finally {
             conn?.disconnect()
         }
+    }
+
+    private fun tryLaunchYouTubeViaDial(dialBaseUrl: String, videoId: String): Boolean {
+        val appEndpoints = listOf(
+            "${dialBaseUrl.trimEnd('/')}/YouTube",
+            "${dialBaseUrl.trimEnd('/')}/youtube"
+        )
+        for (endpoint in appEndpoints) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 2500
+                    readTimeout = 2500
+                    requestMethod = "POST"
+                    doOutput = true
+                    instanceFollowRedirects = false
+                    setRequestProperty("User-Agent", USER_AGENT)
+                    setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                }
+                val payload = "v=$videoId"
+                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
+                    writer.write(payload)
+                    writer.flush()
+                }
+                if (conn.responseCode in 200..204) {
+                    return true
+                }
+            } catch (_: Exception) {
+            } finally {
+                conn?.disconnect()
+            }
+        }
+        return false
     }
 
     suspend fun playLocalMediaOnDevice(
