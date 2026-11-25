@@ -1,12 +1,17 @@
 package com.pluscast.tvcast
 
 import android.content.Context
+import android.net.Uri
 import android.net.wifi.WifiManager
+import android.provider.OpenableColumns
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
 import java.io.BufferedReader
+import java.io.InputStream
+import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -16,11 +21,14 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.MulticastSocket
 import java.net.NetworkInterface
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class DlnaDevice(
     val friendlyName: String,
@@ -97,6 +105,8 @@ class DlnaController(private val context: Context? = null) {
         private const val SSDP_GROUP = "239.255.255.250"
         private const val SSDP_PORT = 1900
     }
+
+    private var localMediaServer: LocalMediaHttpServer? = null
 
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
@@ -248,6 +258,176 @@ class DlnaController(private val context: Context? = null) {
             found.values.toList()
         }
 
+    /**
+     * Generic entry point: HTTP URL, YouTube URL/ID, ya Local URI (`content://` / `file://`)
+     * ko automatically handle karta hai.
+     */
+    suspend fun castMedia(
+        device: DlnaDevice,
+        mediaUrlOrUri: String,
+        title: String = "PlusCast Media",
+        mimeType: String = "application/x-mpegURL"
+    ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val trimmed = mediaUrlOrUri.trim()
+        if (trimmed.isEmpty()) {
+            return@withContext DlnaPlayResult(false, "Empty media URL or URI")
+        }
+
+        if (isYouTubeInput(trimmed)) {
+            return@withContext playYouTubeOnDevice(
+                device = device,
+                youtubeUrlOrId = trimmed,
+                title = title
+            )
+        }
+
+        val lower = trimmed.lowercase(Locale.US)
+        if (lower.startsWith("content://") || lower.startsWith("file://")) {
+            return@withContext playLocalMediaOnDevice(
+                device = device,
+                uri = Uri.parse(trimmed),
+                title = title,
+                mimeType = mimeType
+            )
+        }
+
+        return@withContext playMediaOnDevice(
+            device = device,
+            mediaUrl = trimmed,
+            title = title,
+            mimeType = mimeType
+        )
+    }
+
+    /**
+     * YouTube URL ya Video ID ko DLNA AVTransport renderer par bhejta hai.
+     */
+    suspend fun playYouTubeOnDevice(
+        device: DlnaDevice,
+        youtubeUrlOrId: String,
+        title: String = "YouTube Video"
+    ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val videoId = extractYouTubeVideoId(youtubeUrlOrId)
+            ?: return@withContext DlnaPlayResult(false, "Invalid YouTube URL ya Video ID")
+
+        val normalizedUrl = if (isValidHttpUrl(youtubeUrlOrId.trim())) {
+            youtubeUrlOrId.trim()
+        } else {
+            "https://www.youtube.com/watch?v=$videoId"
+        }
+
+        val controlUrl = device.controlUrl.trim()
+        if (controlUrl.isBlank() || !isValidHttpUrl(controlUrl)) {
+            return@withContext DlnaPlayResult(false, "Invalid or missing Control URL")
+        }
+
+        val serviceUrn = device.serviceType.trim().ifBlank {
+            "urn:schemas-upnp-org:service:AVTransport:1"
+        }
+        val safeTitle = title.trim().ifEmpty { "YouTube ($videoId)" }
+        val escapedUrl = escapeXml(normalizedUrl)
+        val escapedTitle = escapeXml(safeTitle)
+
+        sendStopAction(controlUrl, serviceUrn)
+
+        val ytDidl =
+            """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem.videoBroadcast</upnp:class><res protocolInfo="http-get:*:video/mp4:*">$escapedUrl</res></item></DIDL-Lite>"""
+
+        fun buildSetUriSoap(metaDataXml: String): String = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:SetAVTransportURI xmlns:u="$serviceUrn">
+                  <InstanceID>0</InstanceID>
+                  <CurrentURI>$escapedUrl</CurrentURI>
+                  <CurrentURIMetaData>${escapeXml(metaDataXml)}</CurrentURIMetaData>
+                </u:SetAVTransportURI>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+
+        var setUriRes = sendSoapAction(
+            controlUrl = controlUrl,
+            soapAction = "\"$serviceUrn#SetAVTransportURI\"",
+            body = buildSetUriSoap(ytDidl)
+        )
+        if (!setUriRes.success) {
+            setUriRes = sendSoapAction(
+                controlUrl = controlUrl,
+                soapAction = "\"$serviceUrn#SetAVTransportURI\"",
+                body = buildSetUriSoap("")
+            )
+        }
+        if (!setUriRes.success) {
+            return@withContext DlnaPlayResult(
+                false,
+                "YouTube DLNA SetURI fail (${setUriRes.message}) - Player fallback use karein"
+            )
+        }
+
+        delay(300)
+        return@withContext sendPlayAction(controlUrl, serviceUrn)
+    }
+
+    /**
+     * Local device media (`content://` ya `file://`) ko local Wi-Fi HTTP stream ke zariye
+     * DLNA renderer par cast karta hai.
+     */
+    suspend fun playLocalMediaOnDevice(
+        device: DlnaDevice,
+        uri: Uri,
+        title: String = "Local Media",
+        mimeType: String = "video/mp4"
+    ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val appContext = context?.applicationContext
+            ?: return@withContext DlnaPlayResult(false, "Context unavailable for local media streaming")
+
+        val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
+            ?: return@withContext DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila")
+
+        val resolvedMime = appContext.contentResolver.getType(uri)
+            ?: guessMimeTypeFromUri(uri, mimeType)
+        val fileSize = queryFileSize(appContext, uri)
+        val safeTitle = title.trim().ifEmpty {
+            queryDisplayName(appContext, uri) ?: "Local Media"
+        }
+
+        localMediaServer?.stopServer()
+        val server = LocalMediaHttpServer(
+            context = appContext,
+            bindIp = localIp,
+            mediaUri = uri,
+            mimeType = resolvedMime,
+            contentLength = fileSize
+        )
+        val port = server.startServer()
+            ?: return@withContext DlnaPlayResult(false, "Local HTTP relay server start nahi ho saka")
+
+        localMediaServer = server
+        val streamUrl = "http://$localIp:$port/media"
+        Log.d(TAG, "Local media relay URL: $streamUrl (mime=$resolvedMime, size=$fileSize)")
+
+        val result = playMediaOnDevice(
+            device = device,
+            mediaUrl = streamUrl,
+            title = safeTitle,
+            mimeType = resolvedMime
+        )
+        if (!result.success) {
+            server.stopServer()
+            if (localMediaServer === server) {
+                localMediaServer = null
+            }
+        }
+        result
+    }
+
+    fun releaseLocalMediaServer() {
+        localMediaServer?.stopServer()
+        localMediaServer = null
+    }
+
     suspend fun playMediaOnDevice(
         device: DlnaDevice,
         mediaUrl: String,
@@ -274,29 +454,20 @@ class DlnaController(private val context: Context? = null) {
         val safeTitle = title.trim().ifEmpty { "PlusCast IPTV" }
         val resolvedMime = resolveMimeType(cleanUrl, mimeType)
 
-        val stopSoap = """
-            <?xml version="1.0" encoding="utf-8"?>
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:Stop xmlns:u="$serviceUrn">
-                  <InstanceID>0</InstanceID>
-                </u:Stop>
-              </s:Body>
-            </s:Envelope>
-        """.trimIndent()
-        sendSoapAction(
-            controlUrl = controlUrl,
-            soapAction = "\"$serviceUrn#Stop\"",
-            body = stopSoap
-        )
+        sendStopAction(controlUrl, serviceUrn)
 
         val escapedUrl = escapeXml(cleanUrl)
         val escapedTitle = escapeXml(safeTitle)
         val escapedMime = escapeXml(resolvedMime)
         val protocolInfo = "http-get:*:$escapedMime:*"
+        val upnpClass = if (resolvedMime.startsWith("audio/", ignoreCase = true)) {
+            "object.item.audioItem.musicTrack"
+        } else {
+            "object.item.videoItem"
+        }
 
         val rawDidl =
-            """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
+            """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>$upnpClass</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
 
         fun buildSetUriSoap(metaDataXml: String): String = """
             <?xml version="1.0" encoding="utf-8"?>
@@ -330,7 +501,28 @@ class DlnaController(private val context: Context? = null) {
         }
 
         delay(300)
+        return@withContext sendPlayAction(controlUrl, serviceUrn)
+    }
 
+    private fun sendStopAction(controlUrl: String, serviceUrn: String) {
+        val stopSoap = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:Stop xmlns:u="$serviceUrn">
+                  <InstanceID>0</InstanceID>
+                </u:Stop>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+        sendSoapAction(
+            controlUrl = controlUrl,
+            soapAction = "\"$serviceUrn#Stop\"",
+            body = stopSoap
+        )
+    }
+
+    private fun sendPlayAction(controlUrl: String, serviceUrn: String): DlnaPlayResult {
         val playSoap = """
             <?xml version="1.0" encoding="utf-8"?>
             <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
@@ -348,12 +540,88 @@ class DlnaController(private val context: Context? = null) {
             soapAction = "\"$serviceUrn#Play\"",
             body = playSoap
         )
+        return if (!playRes.success) {
+            DlnaPlayResult(false, "Play fail: ${playRes.message}")
+        } else {
+            DlnaPlayResult(true, "Playing")
+        }
+    }
 
-        if (!playRes.success) {
-            return@withContext DlnaPlayResult(false, "Play fail: ${playRes.message}")
+    private fun isYouTubeInput(input: String): Boolean {
+        if (input.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return true
+        val lower = input.lowercase(Locale.US)
+        return lower.contains("youtube.com/") || lower.contains("youtu.be/")
+    }
+
+    private fun extractYouTubeVideoId(input: String): String? {
+        val trimmed = input.trim()
+        if (trimmed.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) {
+            return trimmed
+        }
+        val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
+        val host = uri.host?.lowercase(Locale.US).orEmpty()
+
+        if (host.contains("youtu.be")) {
+            val seg = uri.lastPathSegment?.trim().orEmpty()
+            if (seg.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return seg
         }
 
-        DlnaPlayResult(true, "Playing")
+        uri.getQueryParameter("v")?.trim()?.let { v ->
+            if (v.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return v
+        }
+
+        val segments = uri.pathSegments.orEmpty()
+        for (i in 0 until segments.size - 1) {
+            val tag = segments[i].lowercase(Locale.US)
+            if (tag == "shorts" || tag == "embed" || tag == "live" || tag == "v") {
+                val candidate = segments[i + 1].trim()
+                if (candidate.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return candidate
+            }
+        }
+        return null
+    }
+
+    private fun guessMimeTypeFromUri(uri: Uri, fallback: String): String {
+        val lower = uri.toString().lowercase(Locale.US)
+        return when {
+            lower.endsWith(".mp4") || lower.endsWith(".m4v") -> "video/mp4"
+            lower.endsWith(".mkv") -> "video/x-matroska"
+            lower.endsWith(".webm") -> "video/webm"
+            lower.endsWith(".avi") -> "video/x-msvideo"
+            lower.endsWith(".mp3") -> "audio/mpeg"
+            lower.endsWith(".m4a") || lower.endsWith(".aac") -> "audio/mp4"
+            lower.endsWith(".wav") -> "audio/wav"
+            lower.endsWith(".flac") -> "audio/flac"
+            else -> fallback.ifBlank { "video/mp4" }
+        }
+    }
+
+    private fun queryFileSize(context: Context, uri: Uri): Long {
+        return try {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (idx >= 0 && !cursor.isNull(idx)) cursor.getLong(idx) else -1L
+                    } else -1L
+                } ?: -1L
+        } catch (_: Exception) {
+            -1L
+        }
+    }
+
+    private fun queryDisplayName(context: Context, uri: Uri): String? {
+        return try {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) cursor.getString(idx) else null
+                    } else null
+                }
+        } catch (_: Exception) {
+            null
+        } ?: uri.lastPathSegment
     }
 
     private fun isValidHttpUrl(url: String): Boolean {
@@ -541,5 +809,219 @@ class DlnaController(private val context: Context? = null) {
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&apos;")
+    }
+
+    /**
+     * Local media URI (`content://` ya `file://`) ko LAN par HTTP stream karne ke liye
+     * lightweight single-media HTTP relay server.
+     */
+    private class LocalMediaHttpServer(
+        private val context: Context,
+        private val bindIp: String,
+        private val mediaUri: Uri,
+        private val mimeType: String,
+        private val contentLength: Long
+    ) {
+        private val running = AtomicBoolean(false)
+        private var serverSocket: ServerSocket? = null
+        private var acceptThread: Thread? = null
+
+        fun startServer(): Int? {
+            return try {
+                val addr = InetAddress.getByName(bindIp)
+                val sock = ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(addr, 0), 16)
+                    soTimeout = 1000
+                }
+                serverSocket = sock
+                running.set(true)
+
+                acceptThread = Thread({
+                    while (running.get()) {
+                        try {
+                            val client = sock.accept()
+                            Thread({ handleClient(client) }, "PlusCastRelayClient").start()
+                        } catch (_: SocketTimeoutException) {
+                        } catch (_: Exception) {
+                            if (!running.get()) break
+                        }
+                    }
+                }, "PlusCastRelayServer").apply {
+                    isDaemon = true
+                    start()
+                }
+
+                sock.localPort
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start local media HTTP server", e)
+                stopServer()
+                null
+            }
+        }
+
+        fun stopServer() {
+            running.set(false)
+            try {
+                serverSocket?.close()
+            } catch (_: Exception) {
+            }
+            serverSocket = null
+        }
+
+        private fun handleClient(socket: Socket) {
+            socket.use { client ->
+                val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
+                val requestLine = reader.readLine() ?: return
+                val parts = requestLine.split(" ")
+                val method = parts.getOrNull(0)?.uppercase(Locale.US).orEmpty()
+
+                var rangeHeader: String? = null
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    if (line.isEmpty()) break
+                    if (line.startsWith("Range:", ignoreCase = true)) {
+                        rangeHeader = line.substringAfter(':').trim()
+                    }
+                }
+
+                if (method != "GET" && method != "HEAD") {
+                    writeSimpleResponse(client, "405 Method Not Allowed", "Method Not Allowed")
+                    return
+                }
+
+                val totalLen = contentLength.takeIf { it > 0L } ?: -1L
+                val (startByte, endByte, hasRange) = parseRange(rangeHeader, totalLen)
+
+                if (hasRange && totalLen > 0L && (startByte >= totalLen || endByte < startByte)) {
+                    val headers = buildString {
+                        append("HTTP/1.1 416 Range Not Satisfiable\r\n")
+                        append("Content-Range: bytes */$totalLen\r\n")
+                        append("Connection: close\r\n\r\n")
+                    }
+                    client.getOutputStream().write(headers.toByteArray(Charsets.ISO_8859_1))
+                    client.getOutputStream().flush()
+                    return
+                }
+
+                val statusLine = if (hasRange && totalLen > 0L) {
+                    "HTTP/1.1 206 Partial Content"
+                } else {
+                    "HTTP/1.1 200 OK"
+                }
+
+                val responseLength = if (hasRange && totalLen > 0L) {
+                    (endByte - startByte + 1L).coerceAtLeast(0L)
+                } else {
+                    totalLen
+                }
+
+                val headerBuilder = StringBuilder().apply {
+                    append("$statusLine\r\n")
+                    append("Content-Type: $mimeType\r\n")
+                    append("Accept-Ranges: bytes\r\n")
+                    if (hasRange && totalLen > 0L) {
+                        append("Content-Range: bytes $startByte-$endByte/$totalLen\r\n")
+                    }
+                    if (responseLength >= 0L) {
+                        append("Content-Length: $responseLength\r\n")
+                    }
+                    append("Connection: close\r\n\r\n")
+                }
+
+                val out = BufferedOutputStream(client.getOutputStream(), 64 * 1024)
+                out.write(headerBuilder.toString().toByteArray(Charsets.ISO_8859_1))
+                out.flush()
+
+                if (method == "HEAD") return
+
+                val input: InputStream? = try {
+                    context.contentResolver.openInputStream(mediaUri)
+                } catch (_: Exception) {
+                    null
+                }
+
+                input?.use { stream ->
+                    if (startByte > 0L) {
+                        skipFully(stream, startByte)
+                    }
+                    val buffer = ByteArray(64 * 1024)
+                    var remaining = if (hasRange && totalLen > 0L) responseLength else Long.MAX_VALUE
+                    while (running.get() && remaining > 0L) {
+                        val toRead = minOf(buffer.size.toLong(), remaining).toInt()
+                        val read = stream.read(buffer, 0, toRead)
+                        if (read <= 0) break
+                        out.write(buffer, 0, read)
+                        if (remaining != Long.MAX_VALUE) {
+                            remaining -= read.toLong()
+                        }
+                    }
+                    out.flush()
+                }
+            } catch (_: Exception) {
+                // Client disconnect ya stream close normal hai
+            }
+        }
+
+        private fun parseRange(rangeHeader: String?, totalLen: Long): Triple<Long, Long, Boolean> {
+            if (rangeHeader.isNullOrBlank() || !rangeHeader.startsWith("bytes=", ignoreCase = true) || totalLen <= 0L) {
+                return Triple(0L, totalLen - 1L, false)
+            }
+            val spec = rangeHeader.substringAfter('=').split(',').firstOrNull()?.trim().orEmpty()
+            val dashIdx = spec.indexOf('-')
+            if (dashIdx < 0) return Triple(0L, totalLen - 1L, false)
+
+            val startStr = spec.substring(0, dashIdx).trim()
+            val endStr = spec.substring(dashIdx + 1).trim()
+
+            return try {
+                when {
+                    startStr.isEmpty() && endStr.isNotEmpty() -> {
+                        val suffix = endStr.toLong().coerceAtLeast(1L)
+                        val start = (totalLen - suffix).coerceAtLeast(0L)
+                        Triple(start, totalLen - 1L, true)
+                    }
+                    startStr.isNotEmpty() && endStr.isEmpty() -> {
+                        val start = startStr.toLong().coerceAtLeast(0L)
+                        Triple(start, totalLen - 1L, true)
+                    }
+                    startStr.isNotEmpty() && endStr.isNotEmpty() -> {
+                        val start = startStr.toLong().coerceAtLeast(0L)
+                        val end = endStr.toLong().coerceAtMost(totalLen - 1L)
+                        Triple(start, end, true)
+                    }
+                    else -> Triple(0L, totalLen - 1L, false)
+                }
+            } catch (_: Exception) {
+                Triple(0L, totalLen - 1L, false)
+            }
+        }
+
+        private fun skipFully(stream: InputStream, bytesToSkip: Long) {
+            var skippedTotal = 0L
+            while (skippedTotal < bytesToSkip) {
+                val n = stream.skip(bytesToSkip - skippedTotal)
+                if (n > 0L) {
+                    skippedTotal += n
+                } else {
+                    if (stream.read() < 0) break
+                    skippedTotal += 1L
+                }
+            }
+        }
+
+        private fun writeSimpleResponse(socket: Socket, status: String, body: String) {
+            val bytes = body.toByteArray(Charsets.UTF_8)
+            val headers = buildString {
+                append("HTTP/1.1 $status\r\n")
+                append("Content-Type: text/plain; charset=utf-8\r\n")
+                append("Content-Length: ${bytes.size}\r\n")
+                append("Connection: close\r\n\r\n")
+            }
+            val out = socket.getOutputStream()
+            out.write(headers.toByteArray(Charsets.ISO_8859_1))
+            out.write(bytes)
+            out.flush()
+        }
     }
 }
