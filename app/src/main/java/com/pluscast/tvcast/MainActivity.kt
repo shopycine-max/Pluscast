@@ -29,7 +29,10 @@ import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -747,6 +750,16 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
+        val btnOpenExternal = TextView(this).apply {
+            text = "Browser"
+            setTextColor(Color.parseColor(ACCENT_SKY))
+            textSize = 12f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+        }
+
         val btnCastCurrent = TextView(this).apply {
             text = "Cast TV"
             setTextColor(Color.parseColor(ACCENT_CYAN))
@@ -754,7 +767,7 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             isClickable = true
             isFocusable = true
-            setPadding(dp(10), dp(6), dp(10), dp(6))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
         }
 
         val btnClose = TextView(this).apply {
@@ -764,10 +777,11 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             isClickable = true
             isFocusable = true
-            setPadding(dp(12), dp(4), dp(6), dp(4))
+            setPadding(dp(10), dp(4), dp(4), dp(4))
         }
 
         topBar.addView(tvUrl)
+        topBar.addView(btnOpenExternal)
         topBar.addView(btnCastCurrent)
         topBar.addView(btnClose)
 
@@ -789,15 +803,16 @@ class MainActivity : AppCompatActivity() {
                 1f
             )
             setBackgroundColor(Color.parseColor(BG_PRIMARY))
+            isFocusable = true
+            isFocusableInTouchMode = true
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
+                loadWithOverviewMode = true
+                useWideViewPort = true
                 mediaPlaybackRequiresUserGesture = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                userAgentString = settings.userAgentString
-                    .replace("; wv", "")
-                    .replace("Version/4.0 ", "")
             }
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             webChromeClient = object : WebChromeClient() {
@@ -807,6 +822,15 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    progress.visibility = View.VISIBLE
+                    val current = url.orEmpty()
+                    if (current.isNotEmpty()) {
+                        tvUrl.text = current
+                    }
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     progress.visibility = View.GONE
                     val current = url.orEmpty()
@@ -832,6 +856,44 @@ class MainActivity : AppCompatActivity() {
                         updateLastWatchedPill()
                     }
                 }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    error: WebResourceError?
+                ) {
+                    super.onReceivedError(view, request, error)
+                    if (request?.isForMainFrame == true) {
+                        progress.visibility = View.GONE
+                        val desc = error?.description?.toString().orEmpty()
+                        if (!isFinishing && !isDestroyed) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "YouTube load error: ${desc.ifBlank { "Connection issue" }}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: RenderProcessGoneDetail?
+                ): Boolean {
+                    progress.visibility = View.GONE
+                    runCatching {
+                        (view?.parent as? ViewGroup)?.removeView(view)
+                        view?.destroy()
+                    }
+                    if (!isFinishing && !isDestroyed) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "WebView render reset hua, dobara kholein",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    return true
+                }
             }
             loadUrl(normalizedStart)
         }
@@ -843,6 +905,15 @@ class MainActivity : AppCompatActivity() {
         val dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen)
             .setView(container)
             .create()
+
+        btnOpenExternal.setOnClickListener {
+            val target = webView.url?.trim().orEmpty().ifEmpty { normalizedStart }
+            runCatching {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+            }.onFailure {
+                Toast.makeText(this, "Browser open nahi ho saka", Toast.LENGTH_SHORT).show()
+            }
+        }
 
         btnClose.setOnClickListener {
             runCatching {
@@ -942,6 +1013,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialog.show()
+        webView.requestFocus()
     }
 
     private fun normalizeYouTubeBrowserUrl(raw: String): String {
