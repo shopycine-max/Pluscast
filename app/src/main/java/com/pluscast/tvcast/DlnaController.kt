@@ -267,7 +267,6 @@ class DlnaController(private val context: Context? = null) {
                 }
             }
 
-            // Pehle har LOCATION se Application-URL (DIAL) aur AVTransport dono extract karein
             for ((loc, hintDial) in locations) {
                 val host = runCatching { URL(loc).host }.getOrNull().orEmpty()
                 val probedDial = probeDialApplicationUrl(loc)
@@ -285,7 +284,6 @@ class DlnaController(private val context: Context? = null) {
                 }
             }
 
-            // Same host par mile DIAL Application-URL ko AVTransport device ke saath merge karein
             found.values.map { dev ->
                 val host = runCatching { URL(dev.controlUrl).host }.getOrNull().orEmpty()
                 val mergedDial = dev.dialAppUrl.ifBlank { dialUrlsByHost[host].orEmpty() }
@@ -367,7 +365,6 @@ class DlnaController(private val context: Context? = null) {
 
         val host = runCatching { URL(device.controlUrl).host }.getOrNull().orEmpty()
         if (host.isNotBlank()) {
-            // Live SSDP DIAL scan bhi karein agar cached device mein dialAppUrl blank reh gaya ho
             val liveDial = discoverDialUrlForHost(host)
             if (!liveDial.isNullOrBlank() && isValidHttpUrl(liveDial)) {
                 urls.add(liveDial.trim().trimEnd('/'))
@@ -385,7 +382,7 @@ class DlnaController(private val context: Context? = null) {
                     urls.add(dialFromHeader.trim().trimEnd('/'))
                 }
             }
-            val commonPorts = listOf(8008, 8060, 56789, 7676, 8009, 9197)
+            val commonPorts = listOf(8008, 8060, 56789, 7676, 8009, 9197, 8080)
             for (port in commonPorts) {
                 urls.add("http://$host:$port/apps")
                 urls.add("http://$host:$port/ws/apps")
@@ -419,7 +416,10 @@ class DlnaController(private val context: Context? = null) {
                     val loc = extractHeader(text, "LOCATION")?.trim().orEmpty()
                     val locHost = runCatching { URL(loc).host }.getOrNull().orEmpty()
                     if (locHost == targetHost && isValidHttpUrl(loc)) {
-                        val headerDial = extractHeader(text, "APPLICATION-URL")?.trim()
+                        val headerDial = (
+                            extractHeader(text, "APPLICATION-URL")
+                                ?: extractHeader(text, "X-DIAL_URL")
+                            )?.trim()
                         if (!headerDial.isNullOrBlank() && isValidHttpUrl(headerDial)) {
                             return headerDial
                         }
@@ -470,13 +470,23 @@ class DlnaController(private val context: Context? = null) {
 
     private fun tryLaunchYouTubeViaDial(dialBaseUrl: String, videoId: String): Boolean {
         val base = dialBaseUrl.trimEnd('/')
-        val appEndpoints = listOf(
-            "$base/YouTube",
-            "$base/YouTubeTV",
-            "$base/youtube"
+        val appIds = listOf(
+            "YouTube",
+            "YouTubeTV",
+            "youtube",
+            "com.google.android.youtube.tv"
+        )
+        val payload = "v=$videoId"
+        val contentTypes = listOf(
+            "text/plain; charset=utf-8",
+            "application/x-www-form-urlencoded; charset=utf-8"
         )
 
-        fun postToDial(targetUrl: String): Boolean {
+        fun postDialRequest(
+            targetUrl: String,
+            body: String,
+            contentType: String
+        ): Pair<Int, String?> {
             return runCatching {
                 var connection: HttpURLConnection? = null
                 try {
@@ -487,25 +497,68 @@ class DlnaController(private val context: Context? = null) {
                         doOutput = true
                         instanceFollowRedirects = false
                         setRequestProperty("User-Agent", USER_AGENT)
-                        setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                        setRequestProperty("Content-Type", contentType)
                     }
                     connection = conn
                     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
-                        writer.write("v=$videoId")
+                        writer.write(body)
                         writer.flush()
                     }
                     val code = conn.responseCode
-                    Log.d(TAG, "DIAL POST $targetUrl -> HTTP $code")
-                    code in 200..204
+                    val location = conn.getHeaderField("Location")?.trim()
+                    Log.d(TAG, "DIAL POST $targetUrl [$contentType] -> HTTP $code | Loc: $location")
+                    code to location
                 } finally {
                     connection?.disconnect()
                 }
-            }.getOrElse { false }
+            }.getOrElse { -1 to null }
         }
 
-        for (endpoint in appEndpoints) {
-            if (postToDial(endpoint)) return true
-            if (postToDial("$endpoint?v=$videoId")) return true
+        fun resolveRunningInstanceUrl(appEndpoint: String): String? {
+            return runCatching {
+                var connection: HttpURLConnection? = null
+                try {
+                    val conn = (URL(appEndpoint).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 1500
+                        readTimeout = 1500
+                        requestMethod = "GET"
+                        instanceFollowRedirects = false
+                        setRequestProperty("User-Agent", USER_AGENT)
+                    }
+                    connection = conn
+                    if (conn.responseCode !in 200..299) return null
+                    val xml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
+                    val linkHref = Regex(
+                        "<link\\b[^>]*rel=[\"']run[\"'][^>]*href=[\"']([^\"']+)[\"']",
+                        RegexOption.IGNORE_CASE
+                    ).find(xml)?.groupValues?.getOrNull(1)?.trim()
+                    if (!linkHref.isNullOrBlank()) {
+                        return URL(URL(appEndpoint), linkHref).toString()
+                    }
+                    null
+                } finally {
+                    connection?.disconnect()
+                }
+            }.getOrNull()
+        }
+
+        for (appId in appIds) {
+            val endpoint = "$base/$appId"
+            for (ct in contentTypes) {
+                val (code, _) = postDialRequest(endpoint, payload, ct)
+                if (code in 200..204) return true
+
+                val (qCode, _) = postDialRequest("$endpoint?v=$videoId", payload, ct)
+                if (qCode in 200..204) return true
+
+                if (code == 409 || qCode == 409) {
+                    val runUrl = resolveRunningInstanceUrl(endpoint)
+                    if (!runUrl.isNullOrBlank() && isValidHttpUrl(runUrl)) {
+                        val (runCode, _) = postDialRequest(runUrl, payload, ct)
+                        if (runCode in 200..204) return true
+                    }
+                }
+            }
         }
         return false
     }
