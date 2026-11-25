@@ -70,10 +70,22 @@
                             android:textColor="@color/pc_text_secondary"
                             android:textSize="12sp" />
                     </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/tvCastDeviceStatus"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@color/pc_cast_badge_bg"
+                        android:paddingHorizontal="10dp"
+                        android:paddingVertical="5dp"
+                        android:text="Cast: Ready"
+                        android:textColor="@color/pc_accent_cyan"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Media Sources Card -->
+            <!-- Media Sources & Casting Card -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -93,35 +105,75 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginBottom="10dp"
-                        android:text="MEDIA SOURCES"
+                        android:text="MEDIA SOURCES &amp; CASTING"
                         android:textColor="@color/pc_accent_cyan"
                         android:textSize="11sp"
                         android:textStyle="bold" />
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/cardLocalMedia"
+                    <LinearLayout
                         android:layout_width="match_parent"
-                        android:layout_height="48dp"
+                        android:layout_height="wrap_content"
                         android:layout_marginBottom="10dp"
-                        android:text="Local Media (Phone Video / Audio)"
-                        android:textAllCaps="false"
-                        android:textColor="@color/pc_text_primary"
-                        app:backgroundTint="@color/pc_surface_elevated"
-                        app:cornerRadius="12dp"
-                        app:strokeColor="@color/pc_border"
-                        app:strokeWidth="1dp" />
+                        android:orientation="horizontal">
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/cardYoutube"
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/cardLocalMedia"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_marginEnd="8dp"
+                            android:layout_weight="1"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="Local Media"
+                            android:textAllCaps="false"
+                            android:textColor="@color/pc_text_primary"
+                            app:backgroundTint="@color/pc_surface_elevated"
+                            app:cornerRadius="12dp"
+                            app:strokeColor="@color/pc_local_border"
+                            app:strokeWidth="1dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnCastLocal"
+                            android:layout_width="wrap_content"
+                            android:layout_height="48dp"
+                            android:text="Cast File"
+                            android:textAllCaps="false"
+                            android:textColor="@color/pc_bg_dark"
+                            app:backgroundTint="@color/pc_local_accent"
+                            app:cornerRadius="12dp" />
+                    </LinearLayout>
+
+                    <LinearLayout
                         android:layout_width="match_parent"
-                        android:layout_height="48dp"
-                        android:text="YouTube Player"
-                        android:textAllCaps="false"
-                        android:textColor="@color/pc_text_primary"
-                        app:backgroundTint="@color/pc_surface_elevated"
-                        app:cornerRadius="12dp"
-                        app:strokeColor="@color/pc_border"
-                        app:strokeWidth="1dp" />
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/cardYoutube"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_marginEnd="8dp"
+                            android:layout_weight="1"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="YouTube Player"
+                            android:textAllCaps="false"
+                            android:textColor="@color/pc_text_primary"
+                            app:backgroundTint="@color/pc_surface_elevated"
+                            app:cornerRadius="12dp"
+                            app:strokeColor="@color/pc_yt_border"
+                            app:strokeWidth="1dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnCastYoutube"
+                            android:layout_width="wrap_content"
+                            android:layout_height="48dp"
+                            android:text="Cast YT"
+                            android:textAllCaps="false"
+                            android:textColor="@color/pc_text_primary"
+                            app:backgroundTint="@color/pc_yt_accent"
+                            app:cornerRadius="12dp" />
+                    </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
