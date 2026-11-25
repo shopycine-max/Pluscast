@@ -52,6 +52,9 @@ import androidx.lifecycle.LifecycleCoroutineScope
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.gms.cast.MediaInfo
+import com.google.android.gms.cast.MediaLoadRequestData
+import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.framework.CastButtonFactory
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
@@ -172,7 +175,6 @@ class MainActivity : AppCompatActivity() {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             } catch (_: SecurityException) {
-                // Kuch providers persistable permission support nahi karte; current session ke liye URI valid rehta hai
             }
             handleLocalMediaSelected(uri)
         }
@@ -769,6 +771,17 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(btnCastCurrent)
         topBar.addView(btnClose)
 
+        val progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 15
+            indeterminateTintList = ColorStateList.valueOf(Color.parseColor(ACCENT_CYAN))
+            progressTintList = ColorStateList.valueOf(Color.parseColor(ACCENT_CYAN))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(3)
+            )
+        }
+
         val webView = WebView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -787,9 +800,28 @@ class MainActivity : AppCompatActivity() {
                     .replace("Version/4.0 ", "")
             }
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    progress.progress = newProgress
+                    progress.visibility = if (newProgress in 1..99) View.VISIBLE else View.GONE
+                }
+            }
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
+                    progress.visibility = View.GONE
+                    val current = url.orEmpty()
+                    if (current.isNotEmpty()) {
+                        tvUrl.text = current
+                        saveLastWatched(
+                            url = current,
+                            title = view?.title?.takeIf { it.isNotBlank() } ?: title
+                        )
+                        updateLastWatchedPill()
+                    }
+                }
+
+                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                    super.doUpdateVisitedHistory(view, url, isReload)
                     val current = url.orEmpty()
                     if (current.isNotEmpty()) {
                         tvUrl.text = current
@@ -805,6 +837,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         container.addView(topBar)
+        container.addView(progress)
         container.addView(webView)
 
         val dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen)
@@ -820,24 +853,83 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnCastCurrent.setOnClickListener {
-            val currentUrl = webView.url?.trim().orEmpty().ifEmpty { normalizedStart }
+            val currentUrl = webView.url?.trim().orEmpty().ifEmpty {
+                tvUrl.text?.toString()?.trim().orEmpty().ifEmpty { normalizedStart }
+            }
             val currentTitle = webView.title?.trim()?.takeIf { it.isNotBlank() } ?: title
-            val savedDevice = DlnaDeviceStore.getLastDevice(this)
-            if (savedDevice == null) {
-                Toast.makeText(this, "Pehle DLNA TV chunein", Toast.LENGTH_SHORT).show()
+            val videoId = M3uPlaylistParser.extractYouTubeVideoId(currentUrl).orEmpty()
+
+            if (videoId.isEmpty()) {
+                Toast.makeText(
+                    this,
+                    "Pehle YouTube par koi video open karein, phir Cast TV dabayein",
+                    Toast.LENGTH_LONG
+                ).show()
                 return@setOnClickListener
             }
+
+            val ytWatchUrl = "https://www.youtube.com/watch?v=$videoId"
             saveLastWatched(url = currentUrl, title = currentTitle)
             updateLastWatchedPill()
-            Toast.makeText(this, "${savedDevice.friendlyName} par bhej rahe hain...", Toast.LENGTH_SHORT).show()
+
+            val activeCast = getActiveCastSession()
+            val savedDevice = DlnaDeviceStore.getLastDevice(this)
+
+            if (activeCast == null && savedDevice == null) {
+                Toast.makeText(this, "Pehle DLNA TV ya Cast device chunein", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            Toast.makeText(this, "TV par cast bhej rahe hain...", Toast.LENGTH_SHORT).show()
+
             lifecycleScope.launch {
-                val res = dlnaController.playYouTubeOnDevice(
-                    device = savedDevice,
-                    youtubeUrlOrId = currentUrl,
-                    title = currentTitle
-                )
+                var anySuccess = false
+                var lastMsg = ""
+
+                if (activeCast != null) {
+                    val castLoaded = runCatching {
+                        val mediaInfo = MediaInfo.Builder(ytWatchUrl)
+                            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+                            .setContentType("video/mp4")
+                            .setMetadata(
+                                MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+                                    putString(MediaMetadata.KEY_TITLE, currentTitle)
+                                }
+                            )
+                            .build()
+                        val req = MediaLoadRequestData.Builder()
+                            .setMediaInfo(mediaInfo)
+                            .setAutoplay(true)
+                            .build()
+                        activeCast.remoteMediaClient?.load(req)
+                        true
+                    }.getOrElse { false }
+                    if (castLoaded) {
+                        anySuccess = true
+                        lastMsg = "${activeCast.castDevice?.friendlyName ?: "Cast TV"} par bhej diya"
+                    }
+                }
+
+                if (savedDevice != null) {
+                    val dlnaRes = dlnaController.playYouTubeOnDevice(
+                        device = savedDevice,
+                        youtubeUrlOrId = videoId,
+                        title = currentTitle
+                    )
+                    if (dlnaRes.success) {
+                        anySuccess = true
+                        lastMsg = dlnaRes.message
+                    } else if (!anySuccess) {
+                        lastMsg = dlnaRes.message
+                    }
+                }
+
                 if (!isFinishing && !isDestroyed) {
-                    Toast.makeText(this@MainActivity, res.message, Toast.LENGTH_SHORT).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        lastMsg.ifBlank { "Cast bhej nahi paye" },
+                        Toast.LENGTH_LONG
+                    ).show()
                 }
             }
         }
