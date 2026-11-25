@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Core Dark Theme Palette -->
     <color name="pc_bg_dark">#0E1117</color>
     <color name="pc_surface">#171C26</color>
     <color name="pc_surface_elevated">#1F2633</color>
@@ -8,4 +9,12 @@
     <color name="pc_accent_cyan">#00E5FF</color>
     <color name="pc_text_primary">#F5F7FA</color>
     <color name="pc_text_secondary">#9AA4B2</color>
+
+    <!-- Casting & Source Badges Palette -->
+    <color name="pc_cast_badge_bg">#12243B</color>
+    <color name="pc_cast_active">#FBBF24</color>
+    <color name="pc_yt_accent">#FF4D6D</color>
+    <color name="pc_yt_border">#5E1F2D</color>
+    <color name="pc_local_accent">#38BDF8</color>
+    <color name="pc_local_border">#1E3A5F</color>
 </resources>
