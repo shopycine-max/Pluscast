@@ -24,6 +24,8 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.util.LruCache
 import android.view.Gravity
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
@@ -36,6 +38,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -44,6 +47,13 @@ import androidx.lifecycle.LifecycleCoroutineScope
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.gms.cast.framework.CastButtonFactory
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManagerListener
+import com.google.android.material.appbar.MaterialToolbar
+import com.pluscast.tvcast.cast.CastOptionsProvider
+import com.pluscast.tvcast.server.LocalMediaServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -98,7 +108,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val dlnaController by lazy { DlnaController(this) }
+    private var localMediaServer: LocalMediaServer? = null
+    private var castContext: CastContext? = null
 
+    private var toolbarView: MaterialToolbar? = null
     private var tvDlnaStatus: TextView? = null
     private var btnYouTubeCast: TextView? = null
     private var btnLocalCast: TextView? = null
@@ -118,6 +131,30 @@ class MainActivity : AppCompatActivity() {
 
     private var isLoadingPlaylist: Boolean = false
     private var dailyTickerJob: Job? = null
+
+    private val castSessionListener = object : SessionManagerListener<CastSession> {
+        override fun onSessionStarting(session: CastSession) = Unit
+        override fun onSessionStarted(session: CastSession, sessionId: String) {
+            updateCastStatusIndicator()
+        }
+        override fun onSessionStartFailed(session: CastSession, errorCode: Int) {
+            updateCastStatusIndicator()
+        }
+        override fun onSessionEnding(session: CastSession) = Unit
+        override fun onSessionEnded(session: CastSession, errorCode: Int) {
+            updateCastStatusIndicator()
+        }
+        override fun onSessionResuming(session: CastSession, wasSuspended: Boolean) = Unit
+        override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
+            updateCastStatusIndicator()
+        }
+        override fun onSessionResumeFailed(session: CastSession, errorCode: Int) {
+            updateCastStatusIndicator()
+        }
+        override fun onSessionSuspended(session: CastSession, reason: Int) {
+            updateCastStatusIndicator()
+        }
+    }
 
     private val localMediaPickerLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
@@ -141,13 +178,16 @@ class MainActivity : AppCompatActivity() {
         window.navigationBarColor = Color.parseColor(BG_PRIMARY)
         WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
+        castContext = runCatching { CastContext.getSharedInstance(this) }.getOrNull()
+
         favoriteUrls = loadFavorites()
 
         val rootView = buildProfessionalUi()
         setContentView(rootView)
+        setupToolbarAndMenu()
         applySystemBarInsets(rootView)
 
-        updateDlnaStatusBadge()
+        updateCastStatusIndicator()
         updateLastWatchedPill()
         rebuildGroupChips(emptyList())
         setupListeners()
@@ -161,9 +201,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        castContext?.sessionManager?.addSessionManagerListener(
+            castSessionListener,
+            CastSession::class.java
+        )
+        updateCastStatusIndicator()
+    }
+
+    override fun onStop() {
+        castContext?.sessionManager?.removeSessionManagerListener(
+            castSessionListener,
+            CastSession::class.java
+        )
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
-        updateDlnaStatusBadge()
+        updateCastStatusIndicator()
         updateLastWatchedPill()
 
         val activeUrl = resolveHiddenPlaylistUrl()
@@ -178,7 +235,78 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         dailyTickerJob?.cancel()
         dailyTickerJob = null
+        dlnaController.releaseLocalMediaServer()
+        stopLocalRelayServer()
         super.onDestroy()
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.menu_cast, menu)
+        runCatching {
+            CastButtonFactory.setUpMediaRouteButton(
+                applicationContext,
+                menu,
+                R.id.media_route_menu_item
+            )
+        }
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_cast_youtube -> {
+                showYouTubeCastDialog()
+                true
+            }
+            R.id.action_cast_local -> {
+                openLocalMediaPicker()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun setupToolbarAndMenu() {
+        val tb = toolbarView ?: return
+        setSupportActionBar(tb)
+        supportActionBar?.setDisplayShowTitleEnabled(false)
+        tb.menu.clear()
+        tb.inflateMenu(R.menu.menu_cast)
+        runCatching {
+            CastButtonFactory.setUpMediaRouteButton(
+                applicationContext,
+                tb.menu,
+                R.id.media_route_menu_item
+            )
+        }
+        tb.setOnMenuItemClickListener { menuItem ->
+            onOptionsItemSelected(menuItem)
+        }
+    }
+
+    private fun getActiveCastSession(): CastSession? {
+        val session = castContext?.sessionManager?.currentCastSession
+        return if (session != null && session.isConnected) session else null
+    }
+
+    private fun updateCastStatusIndicator() {
+        val castSession = getActiveCastSession()
+        if (castSession != null) {
+            val deviceName = castSession.castDevice?.friendlyName?.trim().orEmpty()
+                .ifEmpty { "Cast Device" }
+            tvDlnaStatus?.text = "Cast: $deviceName"
+            tvDlnaStatus?.setTextColor(ContextCompat.getColor(this, R.color.pc_cast_active))
+            return
+        }
+
+        val saved = DlnaDeviceStore.getLastDevice(this)
+        if (saved != null) {
+            tvDlnaStatus?.text = "TV: ${saved.friendlyName}"
+            tvDlnaStatus?.setTextColor(ContextCompat.getColor(this, R.color.pc_cast_active))
+        } else {
+            tvDlnaStatus?.text = "DLNA: Device Chunein"
+            tvDlnaStatus?.setTextColor(ContextCompat.getColor(this, R.color.pc_accent_cyan))
+        }
     }
 
     private fun startDailyAutoRefreshLoop() {
@@ -245,13 +373,26 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(16), dp(36), dp(16), dp(12))
         }
 
+        val toolbar = MaterialToolbar(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            setContentInsetsRelative(0, 0)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(44)
+            )
+        }
+        toolbarView = toolbar
+        root.addView(toolbar)
+
         val headerRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
+            val lp = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
+            lp.topMargin = dp(4)
+            layoutParams = lp
         }
 
         val logoView = ImageView(this).apply {
@@ -577,7 +718,7 @@ class MainActivity : AppCompatActivity() {
 
         AlertDialog.Builder(this)
             .setTitle("YouTube Cast")
-            .setMessage("Video URL ya ID dalein. Agar DLNA device connected hai to uspar cast hoga.")
+            .setMessage("Video URL ya ID dalein. Connected Cast/DLNA device par cast hoga ya Player khulega.")
             .setView(wrapper)
             .setPositiveButton("Cast / Play") { _, _ ->
                 val raw = input.text?.toString()?.trim().orEmpty()
@@ -585,7 +726,7 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "Kripya YouTube link ya ID dalein", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
-                val videoId = extractYouTubeVideoId(raw)
+                val videoId = M3uPlaylistParser.extractYouTubeVideoId(raw)
                 if (videoId == null) {
                     Toast.makeText(this, "Valid YouTube link ya ID nahi mila", Toast.LENGTH_LONG).show()
                     return@setPositiveButton
@@ -594,38 +735,6 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
-    }
-
-    private fun extractYouTubeVideoId(input: String): String? {
-        val trimmed = input.trim()
-        // Direct 11-char video ID
-        if (trimmed.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) {
-            return trimmed
-        }
-        val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
-        val host = uri.host?.lowercase(Locale.US).orEmpty()
-
-        // youtu.be/<id>
-        if (host.contains("youtu.be")) {
-            val seg = uri.lastPathSegment?.trim().orEmpty()
-            if (seg.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return seg
-        }
-
-        // youtube.com/watch?v=<id>
-        uri.getQueryParameter("v")?.trim()?.let { v ->
-            if (v.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return v
-        }
-
-        // youtube.com/shorts/<id>, /embed/<id>, /live/<id>
-        val segments = uri.pathSegments.orEmpty()
-        for (i in 0 until segments.size - 1) {
-            val tag = segments[i].lowercase(Locale.US)
-            if (tag == "shorts" || tag == "embed" || tag == "live" || tag == "v") {
-                val candidate = segments[i + 1].trim()
-                if (candidate.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return candidate
-            }
-        }
-        return null
     }
 
     private fun castYouTubeVideo(rawInput: String, videoId: String) {
@@ -639,6 +748,22 @@ class MainActivity : AppCompatActivity() {
         saveLastWatched(url = normalizedUrl, title = title)
         updateLastWatchedPill()
 
+        // 1. Try active Google Cast session first if connected
+        if (getActiveCastSession() != null) {
+            val ytRequest = CastOptionsProvider.buildYouTubeMediaLoadRequest(
+                youtubeUrlOrId = normalizedUrl,
+                title = title
+            )
+            if (ytRequest != null) {
+                CastOptionsProvider.loadMediaOnActiveCastSession(this, ytRequest) { ok, msg ->
+                    if (!ok) {
+                        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+
+        // 2. Try saved DLNA device if available, else launch PlayerActivity
         val savedDevice = DlnaDeviceStore.getLastDevice(this)
         if (savedDevice != null) {
             Toast.makeText(
@@ -647,13 +772,13 @@ class MainActivity : AppCompatActivity() {
                 Toast.LENGTH_SHORT
             ).show()
             lifecycleScope.launch {
-                val sentToDlna = dispatchCastToDlna(
-                    mediaUrl = normalizedUrl,
-                    title = title,
-                    mimeType = "video/mp4"
+                val res = dlnaController.playYouTubeOnDevice(
+                    device = savedDevice,
+                    youtubeUrlOrId = normalizedUrl,
+                    title = title
                 )
                 if (isFinishing || isDestroyed) return@launch
-                if (!sentToDlna) {
+                if (!res.success) {
                     launchPlayer(
                         url = normalizedUrl,
                         title = title,
@@ -683,29 +808,62 @@ class MainActivity : AppCompatActivity() {
     private fun handleLocalMediaSelected(uri: Uri) {
         val mimeType = contentResolver.getType(uri)
             ?: guessMimeFromUri(uri)
-            ?: "video/*"
+            ?: "video/mp4"
         val displayName = resolveDisplayName(uri) ?: "Local Media"
 
         saveLastWatched(url = uri.toString(), title = displayName)
         updateLastWatchedPill()
 
         val savedDevice = DlnaDeviceStore.getLastDevice(this)
-        if (savedDevice != null) {
+        val hasCastSession = getActiveCastSession() != null
+
+        if (savedDevice != null || hasCastSession) {
+            val targetLabel = savedDevice?.friendlyName ?: "Connected Cast Device"
             AlertDialog.Builder(this)
                 .setTitle("Local Media Cast")
-                .setMessage("\"$displayName\" ko ${savedDevice.friendlyName} par cast karein ya phone player mein chalayein?")
+                .setMessage("\"$displayName\" ko $targetLabel par cast karein ya phone player mein chalayein?")
                 .setPositiveButton("TV par Cast Karein") { _, _ ->
                     lifecycleScope.launch {
-                        val sentToDlna = dispatchCastToDlna(
-                            mediaUrl = uri.toString(),
-                            title = displayName,
-                            mimeType = mimeType
-                        )
+                        var castStarted = false
+
+                        if (hasCastSession) {
+                            val relayUrl = startLocalRelayForUri(uri, mimeType, displayName)
+                            val castReq = relayUrl?.let {
+                                CastOptionsProvider.buildLocalStreamMediaLoadRequest(
+                                    relayHttpUrl = it,
+                                    title = displayName,
+                                    mimeType = mimeType
+                                )
+                            }
+                            if (castReq != null) {
+                                CastOptionsProvider.loadMediaOnActiveCastSession(this@MainActivity, castReq)
+                                castStarted = true
+                            }
+                        }
+
+                        if (savedDevice != null) {
+                            val dlnaRes = dlnaController.playLocalMediaOnDevice(
+                                device = savedDevice,
+                                uri = uri,
+                                title = displayName,
+                                mimeType = mimeType
+                            )
+                            if (dlnaRes.success) {
+                                castStarted = true
+                            }
+                        }
+
                         if (isFinishing || isDestroyed) return@launch
-                        if (!sentToDlna) {
+                        if (castStarted) {
                             Toast.makeText(
                                 this@MainActivity,
-                                "DLNA direct URI bhej nahi paya, player khol rahe hain",
+                                "$displayName → $targetLabel",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Cast bhej nahi paya, player khol rahe hain",
                                 Toast.LENGTH_SHORT
                             ).show()
                             launchPlayer(
@@ -715,12 +873,6 @@ class MainActivity : AppCompatActivity() {
                                 localMediaUri = uri.toString(),
                                 localMediaMime = mimeType
                             )
-                        } else {
-                            Toast.makeText(
-                                this@MainActivity,
-                                "$displayName → ${savedDevice.friendlyName}",
-                                Toast.LENGTH_SHORT
-                            ).show()
                         }
                     }
                 }
@@ -744,6 +896,28 @@ class MainActivity : AppCompatActivity() {
                 localMediaMime = mimeType
             )
         }
+    }
+
+    private suspend fun startLocalRelayForUri(
+        uri: Uri,
+        mimeType: String,
+        displayName: String
+    ): String? = withContext(Dispatchers.IO) {
+        stopLocalRelayServer()
+        val server = LocalMediaServer(applicationContext, port = 8080).apply {
+            setUriToServe(uri = uri, mimeType = mimeType, displayName = displayName)
+        }
+        if (server.startServerSafe()) {
+            localMediaServer = server
+            server.getStreamUrl()
+        } else {
+            null
+        }
+    }
+
+    private fun stopLocalRelayServer() {
+        localMediaServer?.stopServerSafe()
+        localMediaServer = null
     }
 
     private fun resolveDisplayName(uri: Uri): String? {
@@ -771,45 +945,6 @@ class MainActivity : AppCompatActivity() {
             lower.endsWith(".wav") -> "audio/wav"
             lower.endsWith(".flac") -> "audio/flac"
             else -> null
-        }
-    }
-
-    /**
-     * DlnaController ke public method ko safely invoke karta hai agar available ho,
-     * warna false return karta hai taaki fallback player launch ho sake.
-     */
-    private suspend fun dispatchCastToDlna(
-        mediaUrl: String,
-        title: String,
-        mimeType: String
-    ): Boolean {
-        val device = DlnaDeviceStore.getLastDevice(this) ?: return false
-        return withContext(Dispatchers.IO) {
-            val candidateMethods = listOf(
-                "castUrl",
-                "castMedia",
-                "playMedia",
-                "setAvTransportUri",
-                "playOnRenderer"
-            )
-            for (methodName in candidateMethods) {
-                val method = dlnaController.javaClass.methods.firstOrNull { m ->
-                    m.name == methodName && m.parameterCount in 2..4
-                } ?: continue
-                try {
-                    val result = when (method.parameterCount) {
-                        2 -> method.invoke(dlnaController, device, mediaUrl)
-                        3 -> method.invoke(dlnaController, device, mediaUrl, title)
-                        4 -> method.invoke(dlnaController, device, mediaUrl, title, mimeType)
-                        else -> null
-                    }
-                    if (result is Boolean) return@withContext result
-                    return@withContext true
-                } catch (_: Exception) {
-                    // Agla method try karein
-                }
-            }
-            false
         }
     }
 
@@ -869,17 +1004,6 @@ class MainActivity : AppCompatActivity() {
             .apply()
     }
 
-    private fun updateDlnaStatusBadge() {
-        val saved = DlnaDeviceStore.getLastDevice(this)
-        if (saved != null) {
-            tvDlnaStatus?.text = "TV: ${saved.friendlyName}"
-            tvDlnaStatus?.setTextColor(Color.parseColor(ACCENT_GOLD))
-        } else {
-            tvDlnaStatus?.text = "DLNA: Device Chunein"
-            tvDlnaStatus?.setTextColor(Color.parseColor(ACCENT_CYAN))
-        }
-    }
-
     private fun discoverAndPickDlnaDevice() {
         Toast.makeText(this, "DLNA devices khoj raha hai...", Toast.LENGTH_SHORT).show()
         lifecycleScope.launch {
@@ -901,7 +1025,7 @@ class MainActivity : AppCompatActivity() {
                 .setItems(names) { _, which ->
                     val chosen = devices[which]
                     DlnaDeviceStore.saveLastDevice(this@MainActivity, chosen)
-                    updateDlnaStatusBadge()
+                    updateCastStatusIndicator()
                     Toast.makeText(
                         this@MainActivity,
                         "${chosen.friendlyName} set ho gaya",
@@ -1061,13 +1185,33 @@ class MainActivity : AppCompatActivity() {
     private fun openChannelInPlayer(channel: IptvChannel) {
         saveLastWatched(url = channel.url, title = channel.name)
         updateLastWatchedPill()
-        launchPlayer(
-            url = channel.url,
-            title = channel.name,
-            userAgent = channel.userAgent,
-            referrer = channel.referrer,
-            castMode = CAST_MODE_STREAM
-        )
+
+        when (channel.sourceType) {
+            MediaSourceType.YOUTUBE -> launchPlayer(
+                url = channel.url,
+                title = channel.name,
+                userAgent = channel.userAgent,
+                referrer = channel.referrer,
+                castMode = CAST_MODE_YOUTUBE,
+                youtubeUrl = channel.url,
+                youtubeVideoId = channel.youtubeVideoId
+            )
+            MediaSourceType.LOCAL -> launchPlayer(
+                url = channel.url,
+                title = channel.name,
+                userAgent = channel.userAgent,
+                referrer = channel.referrer,
+                castMode = CAST_MODE_LOCAL,
+                localMediaUri = channel.url
+            )
+            MediaSourceType.STREAM -> launchPlayer(
+                url = channel.url,
+                title = channel.name,
+                userAgent = channel.userAgent,
+                referrer = channel.referrer,
+                castMode = CAST_MODE_STREAM
+            )
+        }
     }
 
     private fun launchPlayer(
@@ -1442,7 +1586,13 @@ class MainActivity : AppCompatActivity() {
             ) {
                 cancelLogoLoad()
                 titleTv.text = if (fav) "★ ${channel.name}" else channel.name
+                val sourceTag = when (channel.sourceType) {
+                    MediaSourceType.YOUTUBE -> "YouTube"
+                    MediaSourceType.LOCAL -> "Local"
+                    MediaSourceType.STREAM -> null
+                }
                 val metaParts = listOfNotNull(
+                    sourceTag,
                     channel.language.trim().takeIf { it.isNotEmpty() },
                     channel.group.trim().takeIf { it.isNotEmpty() && !it.equals("All", true) }
                 ).distinct()
