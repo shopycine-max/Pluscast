@@ -867,96 +867,103 @@ class DlnaController(private val context: Context? = null) {
             } catch (_: Exception) {
             }
             serverSocket = null
+            try {
+                acceptThread?.join(500)
+            } catch (_: InterruptedException) {
+            }
+            acceptThread = null
         }
 
         private fun handleClient(socket: Socket) {
-            socket.use { client ->
-                val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
-                val requestLine = reader.readLine() ?: return
-                val parts = requestLine.split(" ")
-                val method = parts.getOrNull(0)?.uppercase(Locale.US).orEmpty()
+            try {
+                socket.use { client ->
+                    val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
+                    val requestLine = reader.readLine() ?: return
+                    val parts = requestLine.split(" ")
+                    val method = parts.getOrNull(0)?.uppercase(Locale.US).orEmpty()
 
-                var rangeHeader: String? = null
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    if (line.isEmpty()) break
-                    if (line.startsWith("Range:", ignoreCase = true)) {
-                        rangeHeader = line.substringAfter(':').trim()
-                    }
-                }
-
-                if (method != "GET" && method != "HEAD") {
-                    writeSimpleResponse(client, "405 Method Not Allowed", "Method Not Allowed")
-                    return
-                }
-
-                val totalLen = contentLength.takeIf { it > 0L } ?: -1L
-                val (startByte, endByte, hasRange) = parseRange(rangeHeader, totalLen)
-
-                if (hasRange && totalLen > 0L && (startByte >= totalLen || endByte < startByte)) {
-                    val headers = buildString {
-                        append("HTTP/1.1 416 Range Not Satisfiable\r\n")
-                        append("Content-Range: bytes */$totalLen\r\n")
-                        append("Connection: close\r\n\r\n")
-                    }
-                    client.getOutputStream().write(headers.toByteArray(Charsets.ISO_8859_1))
-                    client.getOutputStream().flush()
-                    return
-                }
-
-                val statusLine = if (hasRange && totalLen > 0L) {
-                    "HTTP/1.1 206 Partial Content"
-                } else {
-                    "HTTP/1.1 200 OK"
-                }
-
-                val responseLength = if (hasRange && totalLen > 0L) {
-                    (endByte - startByte + 1L).coerceAtLeast(0L)
-                } else {
-                    totalLen
-                }
-
-                val headerBuilder = StringBuilder().apply {
-                    append("$statusLine\r\n")
-                    append("Content-Type: $mimeType\r\n")
-                    append("Accept-Ranges: bytes\r\n")
-                    if (hasRange && totalLen > 0L) {
-                        append("Content-Range: bytes $startByte-$endByte/$totalLen\r\n")
-                    }
-                    if (responseLength >= 0L) {
-                        append("Content-Length: $responseLength\r\n")
-                    }
-                    append("Connection: close\r\n\r\n")
-                }
-
-                val out = BufferedOutputStream(client.getOutputStream(), 64 * 1024)
-                out.write(headerBuilder.toString().toByteArray(Charsets.ISO_8859_1))
-                out.flush()
-
-                if (method == "HEAD") return
-
-                val input: InputStream? = try {
-                    context.contentResolver.openInputStream(mediaUri)
-                } catch (_: Exception) {
-                    null
-                }
-
-                input?.use { stream ->
-                    if (startByte > 0L) {
-                        skipFully(stream, startByte)
-                    }
-                    val buffer = ByteArray(64 * 1024)
-                    var remaining = if (hasRange && totalLen > 0L) responseLength else Long.MAX_VALUE
-                    while (running.get() && remaining > 0L) {
-                        val toRead = minOf(buffer.size.toLong(), remaining).toInt()
-                        val read = stream.read(buffer, 0, toRead)
-                        if (read <= 0) break
-                        out.write(buffer, 0, read)
-                        if (remaining != Long.MAX_VALUE) {
-                            remaining -= read.toLong()
+                    var rangeHeader: String? = null
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.isEmpty()) break
+                        if (line.startsWith("Range:", ignoreCase = true)) {
+                            rangeHeader = line.substringAfter(':').trim()
                         }
                     }
+
+                    if (method != "GET" && method != "HEAD") {
+                        writeSimpleResponse(client, "405 Method Not Allowed", "Method Not Allowed")
+                        return
+                    }
+
+                    val totalLen = contentLength.takeIf { it > 0L } ?: -1L
+                    val (startByte, endByte, hasRange) = parseRange(rangeHeader, totalLen)
+
+                    if (hasRange && totalLen > 0L && (startByte >= totalLen || endByte < startByte)) {
+                        val headers = buildString {
+                            append("HTTP/1.1 416 Range Not Satisfiable\r\n")
+                            append("Content-Range: bytes */$totalLen\r\n")
+                            append("Connection: close\r\n\r\n")
+                        }
+                        client.getOutputStream().write(headers.toByteArray(Charsets.ISO_8859_1))
+                        client.getOutputStream().flush()
+                        return
+                    }
+
+                    val statusLine = if (hasRange && totalLen > 0L) {
+                        "HTTP/1.1 206 Partial Content"
+                    } else {
+                        "HTTP/1.1 200 OK"
+                    }
+
+                    val responseLength = if (hasRange && totalLen > 0L) {
+                        (endByte - startByte + 1L).coerceAtLeast(0L)
+                    } else {
+                        totalLen
+                    }
+
+                    val headerBuilder = StringBuilder().apply {
+                        append("$statusLine\r\n")
+                        append("Content-Type: $mimeType\r\n")
+                        append("Accept-Ranges: bytes\r\n")
+                        if (hasRange && totalLen > 0L) {
+                            append("Content-Range: bytes $startByte-$endByte/$totalLen\r\n")
+                        }
+                        if (responseLength >= 0L) {
+                            append("Content-Length: $responseLength\r\n")
+                        }
+                        append("Connection: close\r\n\r\n")
+                    }
+
+                    val out = BufferedOutputStream(client.getOutputStream(), 64 * 1024)
+                    out.write(headerBuilder.toString().toByteArray(Charsets.ISO_8859_1))
                     out.flush()
+
+                    if (method == "HEAD") return
+
+                    val input: InputStream? = try {
+                        context.contentResolver.openInputStream(mediaUri)
+                    } catch (_: Exception) {
+                        null
+                    }
+
+                    input?.use { stream ->
+                        if (startByte > 0L) {
+                            skipFully(stream, startByte)
+                        }
+                        val buffer = ByteArray(64 * 1024)
+                        var remaining = if (hasRange && totalLen > 0L) responseLength else Long.MAX_VALUE
+                        while (running.get() && remaining > 0L) {
+                            val toRead = minOf(buffer.size.toLong(), remaining).toInt()
+                            val read = stream.read(buffer, 0, toRead)
+                            if (read <= 0) break
+                            out.write(buffer, 0, read)
+                            if (remaining != Long.MAX_VALUE) {
+                                remaining -= read.toLong()
+                            }
+                        }
+                        out.flush()
+                    }
                 }
             } catch (_: Exception) {
                 // Client disconnect ya stream close normal hai
