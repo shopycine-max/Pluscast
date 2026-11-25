@@ -1,26 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
-    <style name="Theme.PlusCast.DarkBroadcast" parent="Theme.Material3.Dark.NoActionBar">
-        <item name="colorPrimary">@color/pc_primary</item>
-        <item name="colorOnPrimary">@color/pc_bg_dark</item>
-        <item name="colorSecondary">@color/pc_accent_cyan</item>
-        <item name="colorOnSecondary">@color/pc_bg_dark</item>
-        <item name="colorTertiary">@color/pc_accent_gold</item>
+    <!-- Network, Wi-Fi & SSDP Multicast for IPTV, Google Cast & DLNA -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
-        <item name="android:colorBackground">@color/pc_bg_dark</item>
-        <item name="colorSurface">@color/pc_surface</item>
-        <item name="colorOnSurface">@color/pc_text_primary</item>
-        <item name="colorSurfaceVariant">@color/pc_surface_elevated</item>
-        <item name="colorOnSurfaceVariant">@color/pc_text_secondary</item>
-        <item name="colorOutline">@color/pc_border</item>
+    <!-- Local Media Access -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
-        <item name="android:statusBarColor">@color/pc_bg_dark</item>
-        <item name="android:navigationBarColor">@color/pc_bg_dark</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
-    </style>
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.PlusCast"
+        android:usesCleartextTraffic="true"
+        tools:targetApi="34">
 
-    <style name="Theme.PlusCast" parent="Theme.PlusCast.DarkBroadcast" />
+        <!-- Google Cast Options Provider (agar CastOptionsProvider class maujood ho) -->
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.pluscast.tvcast.cast.CastOptionsProvider" />
 
-</resources>
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".PlayerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+            android:exported="false"
+            android:supportsPictureInPicture="true" />
+
+    </application>
+
+</manifest>
