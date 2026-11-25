@@ -11,12 +11,12 @@
         android:scaleX="0.72"
         android:scaleY="0.72">
 
-        <!-- TV / Cast Screen Fill -->
+        <!-- Inner Screen Fill -->
         <path
-            android:fillColor="#09111E"
+            android:fillColor="#1A09111E"
             android:pathData="M23,27h62a4,4 0 0,1 4,4v38a4,4 0 0,1 -4,4h-62a4,4 0 0,1 -4,-4v-38a4,4 0 0,1 4,-4z" />
 
-        <!-- TV / Cast Screen Border -->
+        <!-- TV / Cast Screen Frame -->
         <path
             android:fillColor="#00000000"
             android:pathData="M23,27h62a4,4 0 0,1 4,4v38a4,4 0 0,1 -4,4h-62a4,4 0 0,1 -4,-4v-38a4,4 0 0,1 4,-4z"
@@ -25,7 +25,7 @@
             android:strokeLineJoin="round"
             android:strokeWidth="4.2" />
 
-        <!-- Cast / Signal Arcs -->
+        <!-- Cast Signal Arcs (Top-Left Inside Screen) -->
         <path
             android:fillColor="#00000000"
             android:pathData="M30,54a10,10 0 0,1 10,-10"
@@ -39,21 +39,21 @@
             android:strokeLineCap="round"
             android:strokeWidth="3.2" />
 
-        <!-- Center Play Triangle -->
+        <!-- Play Triangle -->
         <path
             android:fillColor="#00E5FF"
             android:pathData="M50,40l20,10l-20,10z" />
 
-        <!-- Live Gold Dot -->
+        <!-- Live Gold Broadcast Dot -->
         <path
             android:fillColor="#FBBF24"
-            android:pathData="M76,36m-4,0a4,4 0 1,0 8,0a4,4 0 1,0 -8,0" />
+            android:pathData="M76,36m-4.2,0a4.2,4.2 0 1,0 8.4,0a4.2,4.2 0 1,0 -8.4,0" />
 
         <!-- Broadcast Stand -->
         <path
             android:fillColor="#00000000"
             android:pathData="M54,73v9M41,82h26"
-            android:strokeColor="#00E5FF"
+            android:strokeColor="#FBBF24"
             android:strokeLineCap="round"
             android:strokeWidth="4.0" />
     </group>
