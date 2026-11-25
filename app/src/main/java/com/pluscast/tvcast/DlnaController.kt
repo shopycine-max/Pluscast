@@ -406,37 +406,12 @@ class DlnaController(private val context: Context? = null) {
             "$base/YouTube",
             "$base/youtube"
         )
-        for (endpoint in appEndpoints) {
-            val postOk = runCatching {
-                var conn: HttpURLConnection? = null
-                try {
-                    conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 2500
-                        readTimeout = 2500
-                        requestMethod = "POST"
-                        doOutput = true
-                        instanceFollowRedirects = false
-                        setRequestProperty("User-Agent", USER_AGENT)
-                        setRequestProperty("Content-Type", "text/plain; charset=utf-8")
-                    }
-                    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
-                        writer.write("v=$videoId")
-                        writer.flush()
-                    }
-                    val code = conn.responseCode
-                    Log.d(TAG, "DIAL POST $endpoint -> HTTP $code")
-                    code in 200..204
-                } finally {
-                    conn?.disconnect()
-                }
-            }.getOrElse { false }
-            if (postOk) return true
 
-            val queryPostOk = runCatching {
-                var conn: HttpURLConnection? = null
+        fun postToDial(targetUrl: String): Boolean {
+            return runCatching {
+                var connection: HttpURLConnection? = null
                 try {
-                    val qUrl = "$endpoint?v=$videoId"
-                    conn = (URL(qUrl).openConnection() as HttpURLConnection).apply {
+                    val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
                         connectTimeout = 2500
                         readTimeout = 2500
                         requestMethod = "POST"
@@ -445,18 +420,23 @@ class DlnaController(private val context: Context? = null) {
                         setRequestProperty("User-Agent", USER_AGENT)
                         setRequestProperty("Content-Type", "text/plain; charset=utf-8")
                     }
+                    connection = conn
                     OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
                         writer.write("v=$videoId")
                         writer.flush()
                     }
                     val code = conn.responseCode
-                    Log.d(TAG, "DIAL POST $qUrl -> HTTP $code")
+                    Log.d(TAG, "DIAL POST $targetUrl -> HTTP $code")
                     code in 200..204
                 } finally {
-                    conn?.disconnect()
+                    connection?.disconnect()
                 }
             }.getOrElse { false }
-            if (queryPostOk) return true
+        }
+
+        for (endpoint in appEndpoints) {
+            if (postToDial(endpoint)) return true
+            if (postToDial("$endpoint?v=$videoId")) return true
         }
         return false
     }
