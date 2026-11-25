@@ -207,6 +207,7 @@ class LocalMediaServer(
             )
         }
 
+        val isHead = session.method == Method.HEAD
         val rangeHeader = session.headers["range"]
 
         return try {
@@ -231,13 +232,16 @@ class LocalMediaServer(
                 }
 
                 val contentLength = end - start + 1
-                val stream = openMediaStream(file, uri)?.apply {
-                    skipFully(start)
-                } ?: return newFixedLengthResponse(
-                    Response.Status.NOT_FOUND,
-                    MIME_PLAINTEXT,
-                    "Unable to open media stream"
-                )
+                val stream: InputStream? = if (isHead) {
+                    null
+                } else {
+                    openMediaStream(file, uri)?.also { it.skipFully(start) }
+                        ?: return newFixedLengthResponse(
+                            Response.Status.NOT_FOUND,
+                            MIME_PLAINTEXT,
+                            "Unable to open media stream"
+                        )
+                }
 
                 newFixedLengthResponse(
                     Response.Status.PARTIAL_CONTENT,
@@ -250,11 +254,15 @@ class LocalMediaServer(
                     addHeader("Content-Length", contentLength.toString())
                 }
             } else {
-                val stream = openMediaStream(file, uri) ?: return newFixedLengthResponse(
-                    Response.Status.NOT_FOUND,
-                    MIME_PLAINTEXT,
-                    "Unable to open media stream"
-                )
+                val stream: InputStream? = if (isHead) {
+                    null
+                } else {
+                    openMediaStream(file, uri) ?: return newFixedLengthResponse(
+                        Response.Status.NOT_FOUND,
+                        MIME_PLAINTEXT,
+                        "Unable to open media stream"
+                    )
+                }
 
                 if (totalLength > 0L) {
                     newFixedLengthResponse(
@@ -333,14 +341,15 @@ class LocalMediaServer(
         } ?: uri.lastPathSegment
     }
 
-    private fun skipFully(stream: InputStream, bytesToSkip: Long) {
+    private fun InputStream.skipFully(bytesToSkip: Long) {
+        if (bytesToSkip <= 0L) return
         var skippedTotal = 0L
         while (skippedTotal < bytesToSkip) {
-            val skipped = stream.skip(bytesToSkip - skippedTotal)
+            val skipped = skip(bytesToSkip - skippedTotal)
             if (skipped > 0L) {
                 skippedTotal += skipped
             } else {
-                if (stream.read() < 0) break
+                if (read() < 0) break
                 skippedTotal += 1L
             }
         }
