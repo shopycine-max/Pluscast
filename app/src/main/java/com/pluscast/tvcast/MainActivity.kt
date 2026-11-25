@@ -1,7 +1,5 @@
 package com.pluscast.tvcast
 
-import android.content.ActivityNotFoundException
-import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
@@ -30,6 +28,11 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.ImageView
@@ -86,6 +89,8 @@ class MainActivity : AppCompatActivity() {
         const val CAST_MODE_STREAM = "STREAM"
         const val CAST_MODE_YOUTUBE = "YOUTUBE"
         const val CAST_MODE_LOCAL = "LOCAL"
+
+        private const val YOUTUBE_MOBILE_HOME_URL = "https://m.youtube.com/"
 
         // Daily auto-refresh interval (24 hours)
         private const val DAILY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
@@ -695,111 +700,171 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    // ==================== DIRECT YOUTUBE LAUNCH ====================
+    // ==================== IN-APP YOUTUBE BROWSER (TUBIO STYLE) ====================
 
     private fun triggerDirectYouTubeFlow() {
-        val clipText = readClipboardYouTubeInput()
-        if (clipText != null && openYouTubeDirectly(clipText)) {
-            return
-        }
-        showYouTubeDirectInputDialog(prefill = clipText.orEmpty())
+        openYouTubeBrowserScreen(initialUrl = YOUTUBE_MOBILE_HOME_URL, title = "YouTube")
     }
 
-    private fun readClipboardYouTubeInput(): String? {
-        return try {
-            val clipboard = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager
-            val item = clipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
-            val text = item?.coerceToText(this)?.toString()?.trim().orEmpty()
-            if (text.isNotEmpty() && M3uPlaylistParser.extractYouTubeVideoId(text) != null) {
-                text
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun showYouTubeDirectInputDialog(prefill: String = "") {
-        val input = EditText(this).apply {
-            setText(prefill)
-            hint = "YouTube link ya Video ID paste karein..."
-            setHintTextColor(Color.parseColor(TEXT_SECONDARY))
-            setTextColor(Color.parseColor(TEXT_PRIMARY))
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-            setSingleLine(true)
-            background = createFocusPillDrawable(
-                normalFill = BG_SURFACE,
-                normalStroke = BORDER_SUBTLE,
-                focusStroke = ACCENT_CYAN,
-                radiusDp = 12
-            )
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-        }
-
-        val wrapper = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(4))
-            addView(input)
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("Direct YouTube Open")
-            .setMessage("YouTube video URL ya ID dalein; yeh seedha YouTube app mein khulega.")
-            .setView(wrapper)
-            .setPositiveButton("Open YouTube") { _, _ ->
-                val raw = input.text?.toString()?.trim().orEmpty()
-                openYouTubeDirectly(raw)
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun openYouTubeDirectly(rawInput: String): Boolean {
-        val trimmed = rawInput.trim()
-        if (trimmed.isEmpty()) {
-            Toast.makeText(this, "Kripya YouTube link ya ID dalein", Toast.LENGTH_SHORT).show()
-            return false
-        }
-
-        val videoId = M3uPlaylistParser.extractYouTubeVideoId(trimmed)
-        val watchUrl = when {
-            trimmed.startsWith("http://", ignoreCase = true) ||
-                trimmed.startsWith("https://", ignoreCase = true) -> trimmed
-            videoId != null -> "https://www.youtube.com/watch?v=$videoId"
-            else -> null
-        }
-
-        if (watchUrl == null) {
-            Toast.makeText(this, "Valid YouTube link ya ID nahi mila", Toast.LENGTH_LONG).show()
-            return false
-        }
-
-        val title = videoId?.let { "YouTube ($it)" } ?: "YouTube Video"
-        saveLastWatched(url = watchUrl, title = title)
+    private fun openYouTubeBrowserScreen(
+        initialUrl: String = YOUTUBE_MOBILE_HOME_URL,
+        title: String = "YouTube"
+    ) {
+        val normalizedStart = normalizeYouTubeBrowserUrl(initialUrl)
+        saveLastWatched(url = normalizedStart, title = title)
         updateLastWatchedPill()
 
-        val uri = Uri.parse(watchUrl)
-        val ytAppIntent = Intent(Intent.ACTION_VIEW, uri).apply {
-            setPackage("com.google.android.youtube")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        CookieManager.getInstance().setAcceptCookie(true)
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor(BG_PRIMARY))
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
         }
 
-        return try {
-            startActivity(ytAppIntent)
-            true
-        } catch (_: ActivityNotFoundException) {
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, uri))
-                true
-            } catch (_: Exception) {
-                Toast.makeText(
-                    this,
-                    "YouTube ya browser open nahi ho saka",
-                    Toast.LENGTH_LONG
-                ).show()
-                false
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.parseColor(BG_SURFACE))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val tvUrl = TextView(this).apply {
+            text = normalizedStart
+            setTextColor(Color.parseColor(TEXT_PRIMARY))
+            textSize = 12f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val btnCastCurrent = TextView(this).apply {
+            text = "Cast TV"
+            setTextColor(Color.parseColor(ACCENT_CYAN))
+            textSize = 12f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+
+        val btnClose = TextView(this).apply {
+            text = "✕"
+            setTextColor(Color.parseColor(ACCENT_RED))
+            textSize = 14f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(12), dp(4), dp(6), dp(4))
+        }
+
+        topBar.addView(tvUrl)
+        topBar.addView(btnCastCurrent)
+        topBar.addView(btnClose)
+
+        val webView = WebView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+            setBackgroundColor(Color.parseColor(BG_PRIMARY))
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                userAgentString = settings.userAgentString
+                    .replace("; wv", "")
+                    .replace("Version/4.0 ", "")
             }
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            webChromeClient = WebChromeClient()
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    val current = url.orEmpty()
+                    if (current.isNotEmpty()) {
+                        tvUrl.text = current
+                        saveLastWatched(
+                            url = current,
+                            title = view?.title?.takeIf { it.isNotBlank() } ?: title
+                        )
+                        updateLastWatchedPill()
+                    }
+                }
+            }
+            loadUrl(normalizedStart)
+        }
+
+        container.addView(topBar)
+        container.addView(webView)
+
+        val dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen)
+            .setView(container)
+            .create()
+
+        btnClose.setOnClickListener {
+            runCatching {
+                webView.stopLoading()
+                webView.destroy()
+            }
+            dialog.dismiss()
+        }
+
+        btnCastCurrent.setOnClickListener {
+            val currentUrl = webView.url?.trim().orEmpty().ifEmpty { normalizedStart }
+            val currentTitle = webView.title?.trim()?.takeIf { it.isNotBlank() } ?: title
+            val savedDevice = DlnaDeviceStore.getLastDevice(this)
+            if (savedDevice == null) {
+                Toast.makeText(this, "Pehle DLNA TV chunein", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            saveLastWatched(url = currentUrl, title = currentTitle)
+            updateLastWatchedPill()
+            Toast.makeText(this, "${savedDevice.friendlyName} par bhej rahe hain...", Toast.LENGTH_SHORT).show()
+            lifecycleScope.launch {
+                val res = dlnaController.playYouTubeOnDevice(
+                    device = savedDevice,
+                    youtubeUrlOrId = currentUrl,
+                    title = currentTitle
+                )
+                if (!isFinishing && !isDestroyed) {
+                    Toast.makeText(this@MainActivity, res.message, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        dialog.setOnDismissListener {
+            runCatching {
+                webView.stopLoading()
+                webView.destroy()
+            }
+        }
+
+        dialog.show()
+    }
+
+    private fun normalizeYouTubeBrowserUrl(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return YOUTUBE_MOBILE_HOME_URL
+        if (trimmed.startsWith("http://", ignoreCase = true) ||
+            trimmed.startsWith("https://", ignoreCase = true)
+        ) {
+            return trimmed
+        }
+        val videoId = M3uPlaylistParser.extractYouTubeVideoId(trimmed)
+        return if (videoId != null) {
+            "https://m.youtube.com/watch?v=$videoId"
+        } else {
+            YOUTUBE_MOBILE_HOME_URL
         }
     }
 
@@ -1191,19 +1256,10 @@ class MainActivity : AppCompatActivity() {
         updateLastWatchedPill()
 
         when (channel.sourceType) {
-            MediaSourceType.YOUTUBE -> {
-                if (!openYouTubeDirectly(channel.url)) {
-                    launchPlayer(
-                        url = channel.url,
-                        title = channel.name,
-                        userAgent = channel.userAgent,
-                        referrer = channel.referrer,
-                        castMode = CAST_MODE_YOUTUBE,
-                        youtubeUrl = channel.url,
-                        youtubeVideoId = channel.youtubeVideoId
-                    )
-                }
-            }
+            MediaSourceType.YOUTUBE -> openYouTubeBrowserScreen(
+                initialUrl = channel.url,
+                title = channel.name
+            )
             MediaSourceType.LOCAL -> launchPlayer(
                 url = channel.url,
                 title = channel.name,
