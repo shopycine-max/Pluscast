@@ -117,6 +117,7 @@ class DlnaController(private val context: Context? = null) {
         withContext(Dispatchers.IO) {
             val found = linkedMapOf<String, DlnaDevice>()
             val locations = linkedMapOf<String, String>()
+            val dialUrlsByHost = linkedMapOf<String, String>()
 
             val appContext = context?.applicationContext
             val wifiManager = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -143,6 +144,7 @@ class DlnaController(private val context: Context? = null) {
                 "urn:schemas-upnp-org:service:AVTransport:1",
                 "urn:schemas-upnp-org:service:AVTransport:2",
                 "urn:dial-multiscreen-org:service:dial:1",
+                "ssdp:all",
                 "upnp:rootdevice"
             )
 
@@ -224,6 +226,11 @@ class DlnaController(private val context: Context? = null) {
                                     )?.trim().orEmpty()
                                 val existingDial = locations[loc].orEmpty()
                                 locations[loc] = existingDial.ifBlank { dialUrl }
+
+                                val host = runCatching { URL(loc).host }.getOrNull().orEmpty()
+                                if (host.isNotBlank() && dialUrl.isNotBlank() && isValidHttpUrl(dialUrl)) {
+                                    dialUrlsByHost.putIfAbsent(host, dialUrl)
+                                }
                                 Log.d(TAG, "SSDP LOCATION: $loc | DIAL: ${locations[loc]}")
                             }
                         } catch (_: SocketTimeoutException) {
@@ -260,14 +267,30 @@ class DlnaController(private val context: Context? = null) {
                 }
             }
 
+            // Pehle har LOCATION se Application-URL (DIAL) aur AVTransport dono extract karein
             for ((loc, hintDial) in locations) {
+                val host = runCatching { URL(loc).host }.getOrNull().orEmpty()
+                val probedDial = probeDialApplicationUrl(loc)
+                if (host.isNotBlank() && !probedDial.isNullOrBlank() && isValidHttpUrl(probedDial)) {
+                    dialUrlsByHost[host] = probedDial
+                    Log.d(TAG, "Discovered DIAL Application-URL for $host: $probedDial")
+                }
+
                 val parsed = parseDeviceDescription(loc, hintDial) ?: continue
                 if (parsed.controlUrl.isNotBlank() && isValidHttpUrl(parsed.controlUrl)) {
+                    if (host.isNotBlank() && parsed.dialAppUrl.isNotBlank()) {
+                        dialUrlsByHost.putIfAbsent(host, parsed.dialAppUrl)
+                    }
                     found["${parsed.friendlyName.lowercase(Locale.US)}|${parsed.controlUrl}"] = parsed
                 }
             }
 
-            found.values.toList()
+            // Same host par mile DIAL Application-URL ko AVTransport device ke saath merge karein
+            found.values.map { dev ->
+                val host = runCatching { URL(dev.controlUrl).host }.getOrNull().orEmpty()
+                val mergedDial = dev.dialAppUrl.ifBlank { dialUrlsByHost[host].orEmpty() }
+                dev.copy(dialAppUrl = mergedDial)
+            }
         }
 
     suspend fun castMedia(
@@ -307,11 +330,6 @@ class DlnaController(private val context: Context? = null) {
         )
     }
 
-    /**
-     * YouTube video ko TV par DIAL ke zariye YouTube app mein launch karne ki koshish karta hai.
-     * Direct DLNA AVTransport watch-URL fallback nahi bhejta kyunki TV AVTransport HTML watch page
-     * ko direct video stream samajh kar 1-3 sec buffer karke fail kar deta hai.
-     */
     suspend fun playYouTubeOnDevice(
         device: DlnaDevice,
         youtubeUrlOrId: String,
@@ -349,6 +367,12 @@ class DlnaController(private val context: Context? = null) {
 
         val host = runCatching { URL(device.controlUrl).host }.getOrNull().orEmpty()
         if (host.isNotBlank()) {
+            // Live SSDP DIAL scan bhi karein agar cached device mein dialAppUrl blank reh gaya ho
+            val liveDial = discoverDialUrlForHost(host)
+            if (!liveDial.isNullOrBlank() && isValidHttpUrl(liveDial)) {
+                urls.add(liveDial.trim().trimEnd('/'))
+            }
+
             val descUrls = listOf(
                 "http://$host:8008/ssdp/device-desc.xml",
                 "http://$host:8060/dial/dd.xml",
@@ -369,6 +393,50 @@ class DlnaController(private val context: Context? = null) {
             }
         }
         return urls.toList()
+    }
+
+    private fun discoverDialUrlForHost(targetHost: String): String? {
+        var sock: DatagramSocket? = null
+        return try {
+            val group = InetAddress.getByName(SSDP_GROUP)
+            sock = DatagramSocket().apply { soTimeout = 400 }
+            val query = buildString {
+                append("M-SEARCH * HTTP/1.1\r\n")
+                append("HOST: $SSDP_GROUP:$SSDP_PORT\r\n")
+                append("MAN: \"ssdp:discover\"\r\n")
+                append("MX: 2\r\n")
+                append("ST: urn:dial-multiscreen-org:service:dial:1\r\n\r\n")
+            }.toByteArray(Charsets.UTF_8)
+            sock.send(DatagramPacket(query, query.size, group, SSDP_PORT))
+
+            val deadline = System.currentTimeMillis() + 1800L
+            val buf = ByteArray(4096)
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    val pkt = DatagramPacket(buf, buf.size)
+                    sock.receive(pkt)
+                    val text = String(pkt.data, 0, pkt.length, Charsets.UTF_8)
+                    val loc = extractHeader(text, "LOCATION")?.trim().orEmpty()
+                    val locHost = runCatching { URL(loc).host }.getOrNull().orEmpty()
+                    if (locHost == targetHost && isValidHttpUrl(loc)) {
+                        val headerDial = extractHeader(text, "APPLICATION-URL")?.trim()
+                        if (!headerDial.isNullOrBlank() && isValidHttpUrl(headerDial)) {
+                            return headerDial
+                        }
+                        val probed = probeDialApplicationUrl(loc)
+                        if (!probed.isNullOrBlank() && isValidHttpUrl(probed)) {
+                            return probed
+                        }
+                    }
+                } catch (_: SocketTimeoutException) {
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        } finally {
+            sock?.close()
+        }
     }
 
     private fun probeDialApplicationUrl(descUrl: String): String? {
@@ -404,6 +472,7 @@ class DlnaController(private val context: Context? = null) {
         val base = dialBaseUrl.trimEnd('/')
         val appEndpoints = listOf(
             "$base/YouTube",
+            "$base/YouTubeTV",
             "$base/youtube"
         )
 
