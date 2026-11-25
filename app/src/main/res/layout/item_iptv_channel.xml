@@ -2,6 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:background="@color/pc_surface"
     android:gravity="center_vertical"
     android:orientation="horizontal"
     android:padding="10dp">
@@ -10,7 +11,9 @@
         android:id="@+id/ivChannelLogo"
         android:layout_width="48dp"
         android:layout_height="48dp"
+        android:background="@color/pc_surface_elevated"
         android:contentDescription="Channel Logo"
+        android:padding="4dp"
         android:scaleType="fitCenter"
         android:src="@android:drawable/ic_menu_gallery" />
 
@@ -18,6 +21,7 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="12dp"
+        android:layout_marginEnd="8dp"
         android:layout_weight="1"
         android:orientation="vertical">
 
@@ -28,6 +32,7 @@
             android:ellipsize="end"
             android:maxLines="1"
             android:text="Channel Name"
+            android:textColor="@color/pc_text_primary"
             android:textSize="15sp"
             android:textStyle="bold" />
 
@@ -39,7 +44,20 @@
             android:ellipsize="end"
             android:maxLines="1"
             android:text="Category"
+            android:textColor="@color/pc_text_secondary"
             android:textSize="12sp" />
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/tvSourceBadge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:background="@color/pc_cast_badge_bg"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="4dp"
+        android:text="LIVE"
+        android:textColor="@color/pc_accent_cyan"
+        android:textSize="10sp"
+        android:textStyle="bold" />
 
 </LinearLayout>
