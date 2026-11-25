@@ -39,12 +39,14 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.launch
+import java.util.Locale
 import kotlin.math.abs
 
 class PlayerActivity : AppCompatActivity() {
@@ -54,6 +56,16 @@ class PlayerActivity : AppCompatActivity() {
         const val EXTRA_MEDIA_TITLE = "extra_media_title"
         const val EXTRA_MEDIA_USER_AGENT = "extra_media_user_agent"
         const val EXTRA_MEDIA_REFERRER = "extra_media_referrer"
+
+        const val EXTRA_CAST_MODE = "CAST_MODE"
+        const val EXTRA_YOUTUBE_URL = "YOUTUBE_URL"
+        const val EXTRA_YOUTUBE_VIDEO_ID = "YOUTUBE_VIDEO_ID"
+        const val EXTRA_LOCAL_MEDIA_URI = "LOCAL_MEDIA_URI"
+        const val EXTRA_LOCAL_MEDIA_MIME = "LOCAL_MEDIA_MIME"
+
+        const val CAST_MODE_STREAM = "STREAM"
+        const val CAST_MODE_YOUTUBE = "YOUTUBE"
+        const val CAST_MODE_LOCAL = "LOCAL"
 
         private const val AUTO_HIDE_DELAY_MS = 1600L
 
@@ -83,6 +95,12 @@ class PlayerActivity : AppCompatActivity() {
     private var mediaTitle: String = "PlusCast IPTV"
     private var mediaUserAgent: String = ""
     private var mediaReferrer: String = ""
+    private var castMode: String = CAST_MODE_STREAM
+    private var youtubeUrl: String = ""
+    private var youtubeVideoId: String = ""
+    private var localMediaUri: String = ""
+    private var localMediaMime: String = ""
+
     private var isScreenLocked: Boolean = false
     private var zoomModeIndex: Int = 0
     private var selectedDlnaDevice: DlnaDevice? = null
@@ -107,16 +125,47 @@ class PlayerActivity : AppCompatActivity() {
         window.navigationBarColor = Color.parseColor(BG_PLAYER)
         WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
-        mediaUrl = (
-            intent.getStringExtra("MEDIA_URL")?.trim()?.takeIf { it.isNotEmpty() }
-                ?: intent.getStringExtra(EXTRA_MEDIA_URL)?.trim().orEmpty()
-            ).takeIf(::isValidMediaUrl).orEmpty()
+        castMode = intent.getStringExtra(EXTRA_CAST_MODE)?.trim()?.uppercase(Locale.US)
+            ?.takeIf { it in setOf(CAST_MODE_STREAM, CAST_MODE_YOUTUBE, CAST_MODE_LOCAL) }
+            ?: CAST_MODE_STREAM
+
+        youtubeUrl = intent.getStringExtra(EXTRA_YOUTUBE_URL)?.trim().orEmpty()
+        youtubeVideoId = intent.getStringExtra(EXTRA_YOUTUBE_VIDEO_ID)?.trim().orEmpty()
+        localMediaUri = intent.getStringExtra(EXTRA_LOCAL_MEDIA_URI)?.trim().orEmpty()
+        localMediaMime = intent.getStringExtra(EXTRA_LOCAL_MEDIA_MIME)?.trim().orEmpty()
+
+        val rawUrl = intent.getStringExtra("MEDIA_URL")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: intent.getStringExtra(EXTRA_MEDIA_URL)?.trim()?.takeIf { it.isNotEmpty() }
+            ?: when (castMode) {
+                CAST_MODE_LOCAL -> localMediaUri
+                CAST_MODE_YOUTUBE -> youtubeUrl.ifEmpty {
+                    if (youtubeVideoId.isNotEmpty()) "https://www.youtube.com/watch?v=$youtubeVideoId" else ""
+                }
+                else -> ""
+            }
+
+        mediaUrl = rawUrl.takeIf(::isValidMediaUrl).orEmpty()
+        if (mediaUrl.isNotEmpty()) {
+            val lower = mediaUrl.lowercase(Locale.US)
+            if (castMode == CAST_MODE_STREAM && (lower.startsWith("content://") || lower.startsWith("file://"))) {
+                castMode = CAST_MODE_LOCAL
+                if (localMediaUri.isEmpty()) localMediaUri = mediaUrl
+            } else if (castMode == CAST_MODE_STREAM && (lower.contains("youtube.com/") || lower.contains("youtu.be/"))) {
+                castMode = CAST_MODE_YOUTUBE
+                if (youtubeUrl.isEmpty()) youtubeUrl = mediaUrl
+                if (youtubeVideoId.isEmpty()) youtubeVideoId = M3uPlaylistParser.extractYouTubeVideoId(mediaUrl).orEmpty()
+            }
+        }
 
         mediaTitle = intent.getStringExtra("MEDIA_TITLE")?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?: intent.getStringExtra(EXTRA_MEDIA_TITLE)?.trim()
                 ?.takeIf { it.isNotEmpty() }
-            ?: "PlusCast IPTV"
+            ?: when (castMode) {
+                CAST_MODE_YOUTUBE -> if (youtubeVideoId.isNotEmpty()) "YouTube ($youtubeVideoId)" else "YouTube Video"
+                CAST_MODE_LOCAL -> "Local Media"
+                else -> "PlusCast IPTV"
+            }
 
         mediaUserAgent = sanitizeHeader(
             intent.getStringExtra("MEDIA_USER_AGENT")?.trim()?.takeIf { it.isNotEmpty() }
@@ -130,7 +179,7 @@ class PlayerActivity : AppCompatActivity() {
 
         val savedName = intent.getStringExtra("DLNA_DEVICE_NAME")?.trim().orEmpty()
         val savedCtrl = intent.getStringExtra("DLNA_CONTROL_URL")?.trim().orEmpty()
-        if (savedName.isNotEmpty() && isValidMediaUrl(savedCtrl)) {
+        if (savedName.isNotEmpty() && isValidHttpUrl(savedCtrl)) {
             selectedDlnaDevice = DlnaDevice(
                 friendlyName = savedName,
                 controlUrl = savedCtrl
@@ -147,7 +196,7 @@ class PlayerActivity : AppCompatActivity() {
         syncLockState()
 
         if (mediaUrl.isEmpty()) {
-            Toast.makeText(this, "Valid stream URL nahi mila", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Valid media URL ya file nahi mila", Toast.LENGTH_LONG).show()
             finish()
             return
         }
@@ -178,13 +227,23 @@ class PlayerActivity : AppCompatActivity() {
     override fun onDestroy() {
         autoHideHandler.removeCallbacks(hideControlsRunnable)
         releasePlayer()
+        dlnaController.releaseLocalMediaServer()
         super.onDestroy()
+    }
+
+    private fun isValidHttpUrl(url: String): Boolean {
+        if (url.isBlank() || url.any { it.isISOControl() || it.isWhitespace() }) return false
+        return url.startsWith("http://", ignoreCase = true) ||
+            url.startsWith("https://", ignoreCase = true)
     }
 
     private fun isValidMediaUrl(url: String): Boolean {
         if (url.isBlank() || url.any { it.isISOControl() || it.isWhitespace() }) return false
-        return url.startsWith("http://", ignoreCase = true) ||
-            url.startsWith("https://", ignoreCase = true)
+        val lower = url.lowercase(Locale.US)
+        return lower.startsWith("http://") ||
+            lower.startsWith("https://") ||
+            lower.startsWith("content://") ||
+            lower.startsWith("file://")
     }
 
     private fun sanitizeHeader(value: String): String {
@@ -577,8 +636,10 @@ class PlayerActivity : AppCompatActivity() {
             .setReadTimeoutMs(25_000)
             .setAllowCrossProtocolRedirects(true)
 
+        val combinedDataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
+
         val mediaSourceFactory = DefaultMediaSourceFactory(this)
-            .setDataSourceFactory(httpDataSourceFactory)
+            .setDataSourceFactory(combinedDataSourceFactory)
 
         val exo = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -596,9 +657,14 @@ class PlayerActivity : AppCompatActivity() {
 
                     override fun onPlayerError(error: PlaybackException) {
                         progressBar?.visibility = View.GONE
+                        val msg = if (castMode == CAST_MODE_YOUTUBE) {
+                            "YouTube page URL direct play nahi hota — Cast button se TV par bhejein (${error.errorCodeName})"
+                        } else {
+                            "Media unavailable (${error.errorCodeName})"
+                        }
                         Toast.makeText(
                             this@PlayerActivity,
-                            "Stream unavailable (${error.errorCodeName})",
+                            msg,
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -662,11 +728,34 @@ class PlayerActivity : AppCompatActivity() {
             Toast.LENGTH_SHORT
         ).show()
         lifecycleScope.launch {
-            val res = dlnaController.playMediaOnDevice(
-                device = device,
-                mediaUrl = mediaUrl,
-                title = mediaTitle
-            )
+            val res = when (castMode) {
+                CAST_MODE_LOCAL -> {
+                    val targetUri = Uri.parse(localMediaUri.ifEmpty { mediaUrl })
+                    dlnaController.playLocalMediaOnDevice(
+                        device = device,
+                        uri = targetUri,
+                        title = mediaTitle,
+                        mimeType = localMediaMime.ifEmpty { "video/mp4" }
+                    )
+                }
+                CAST_MODE_YOUTUBE -> {
+                    val ytTarget = youtubeUrl.ifEmpty {
+                        if (youtubeVideoId.isNotEmpty()) youtubeVideoId else mediaUrl
+                    }
+                    dlnaController.playYouTubeOnDevice(
+                        device = device,
+                        youtubeUrlOrId = ytTarget,
+                        title = mediaTitle
+                    )
+                }
+                else -> {
+                    dlnaController.playMediaOnDevice(
+                        device = device,
+                        mediaUrl = mediaUrl,
+                        title = mediaTitle
+                    )
+                }
+            }
             if (isFinishing || isDestroyed) return@launch
 
             if (res.success) {
