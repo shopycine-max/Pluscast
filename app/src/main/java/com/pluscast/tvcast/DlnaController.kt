@@ -33,7 +33,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 data class DlnaDevice(
     val friendlyName: String,
     val controlUrl: String,
-    val serviceType: String = "urn:schemas-upnp-org:service:AVTransport:1"
+    val serviceType: String = "urn:schemas-upnp-org:service:AVTransport:1",
+    val dialAppUrl: String = ""
 )
 
 data class DlnaPlayResult(
@@ -47,6 +48,7 @@ object DlnaDeviceStore {
     private const val KEY_NAME = "last_friendly_name"
     private const val KEY_CONTROL_URL = "last_control_url"
     private const val KEY_SERVICE_TYPE = "last_service_type"
+    private const val KEY_DIAL_APP_URL = "last_dial_app_url"
 
     fun saveLastDevice(context: Context, device: DlnaDevice) {
         val safeName = device.friendlyName.trim()
@@ -62,6 +64,7 @@ object DlnaDeviceStore {
                 KEY_SERVICE_TYPE,
                 device.serviceType.trim().ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
             )
+            .putString(KEY_DIAL_APP_URL, device.dialAppUrl.trim())
             .apply()
     }
 
@@ -75,11 +78,13 @@ object DlnaDeviceStore {
         val serviceType = prefs.getString(KEY_SERVICE_TYPE, null)?.trim()
             .takeUnless { it.isNullOrEmpty() }
             ?: "urn:schemas-upnp-org:service:AVTransport:1"
+        val dialAppUrl = prefs.getString(KEY_DIAL_APP_URL, null)?.trim().orEmpty()
 
         return DlnaDevice(
             friendlyName = name,
             controlUrl = controlUrl,
-            serviceType = serviceType
+            serviceType = serviceType,
+            dialAppUrl = dialAppUrl
         )
     }
 
@@ -107,11 +112,12 @@ class DlnaController(private val context: Context? = null) {
     }
 
     private var localMediaServer: LocalMediaHttpServer? = null
+    private var youtubeRedirectServer: YouTubeRedirectHttpServer? = null
 
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
             val found = linkedMapOf<String, DlnaDevice>()
-            val locations = linkedSetOf<String>()
+            val locations = linkedMapOf<String, String>()
 
             val appContext = context?.applicationContext
             val wifiManager = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -137,6 +143,7 @@ class DlnaController(private val context: Context? = null) {
                 "urn:schemas-upnp-org:device:MediaRenderer:1",
                 "urn:schemas-upnp-org:service:AVTransport:1",
                 "urn:schemas-upnp-org:service:AVTransport:2",
+                "urn:dial-multiscreen-org:service:dial:1",
                 "upnp:rootdevice"
             )
 
@@ -210,9 +217,12 @@ class DlnaController(private val context: Context? = null) {
                             val respPacket = DatagramPacket(buffer, buffer.size)
                             sock.receive(respPacket)
                             val text = String(respPacket.data, 0, respPacket.length, Charsets.UTF_8)
-                            extractHeader(text, "LOCATION")?.trim()?.takeIf { isValidHttpUrl(it) }?.let {
-                                locations.add(it)
-                                Log.d(TAG, "SSDP LOCATION: $it")
+                            val loc = extractHeader(text, "LOCATION")?.trim()?.takeIf { isValidHttpUrl(it) }
+                            if (loc != null) {
+                                val dialUrl = extractHeader(text, "APPLICATION-URL")?.trim().orEmpty()
+                                val existingDial = locations[loc].orEmpty()
+                                locations[loc] = existingDial.ifBlank { dialUrl }
+                                Log.d(TAG, "SSDP LOCATION: $loc | DIAL: ${locations[loc]}")
                             }
                         } catch (_: SocketTimeoutException) {
                         } catch (e: Exception) {
@@ -248,8 +258,8 @@ class DlnaController(private val context: Context? = null) {
                 }
             }
 
-            for (loc in locations) {
-                val parsed = parseDeviceDescription(loc) ?: continue
+            for ((loc, hintDial) in locations) {
+                val parsed = parseDeviceDescription(loc, hintDial) ?: continue
                 if (parsed.controlUrl.isNotBlank() && isValidHttpUrl(parsed.controlUrl)) {
                     found["${parsed.friendlyName.lowercase(Locale.US)}|${parsed.controlUrl}"] = parsed
                 }
@@ -258,10 +268,6 @@ class DlnaController(private val context: Context? = null) {
             found.values.toList()
         }
 
-    /**
-     * Generic entry point: HTTP URL, YouTube URL/ID, ya Local URI (`content://` / `file://`)
-     * ko automatically handle karta hai.
-     */
     suspend fun castMedia(
         device: DlnaDevice,
         mediaUrlOrUri: String,
@@ -300,7 +306,10 @@ class DlnaController(private val context: Context? = null) {
     }
 
     /**
-     * YouTube URL ya Video ID ko DLNA AVTransport renderer par bhejta hai.
+     * YouTube video ko TV par bhejta hai:
+     * 1) Agar TV par DIAL endpoint (`Application-URL`) hai to YouTube app launch try karta hai.
+     * 2) LAN HTTP redirect endpoint (`http://<ip>:<port>/yt?v=<id>`) aur direct watch URL
+     *    ke zariye UPnP AVTransport `SetAVTransportURI` + `Play` try karta hai.
      */
     suspend fun playYouTubeOnDevice(
         device: DlnaDevice,
@@ -310,11 +319,8 @@ class DlnaController(private val context: Context? = null) {
         val videoId = extractYouTubeVideoId(youtubeUrlOrId)
             ?: return@withContext DlnaPlayResult(false, "Invalid YouTube URL ya Video ID")
 
-        val normalizedUrl = if (isValidHttpUrl(youtubeUrlOrId.trim())) {
-            youtubeUrlOrId.trim()
-        } else {
-            "https://www.youtube.com/watch?v=$videoId"
-        }
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val mobileWatchUrl = "https://m.youtube.com/watch?v=$videoId"
 
         val controlUrl = device.controlUrl.trim()
         if (controlUrl.isBlank() || !isValidHttpUrl(controlUrl)) {
@@ -325,54 +331,83 @@ class DlnaController(private val context: Context? = null) {
             "urn:schemas-upnp-org:service:AVTransport:1"
         }
         val safeTitle = title.trim().ifEmpty { "YouTube ($videoId)" }
-        val escapedUrl = escapeXml(normalizedUrl)
-        val escapedTitle = escapeXml(safeTitle)
+
+        // 1. DIAL fallback (agar TV DIAL YouTube app support karta hai)
+        if (device.dialAppUrl.isNotBlank() && isValidHttpUrl(device.dialAppUrl)) {
+            if (tryLaunchYouTubeViaDial(device.dialAppUrl, videoId)) {
+                return@withContext DlnaPlayResult(true, "${device.friendlyName} YouTube mein open ho raha hai")
+            }
+        }
+
+        // 2. Local LAN redirect URL tayyar karein taaki TV ko LAN HTTP endpoint mil sake
+        val appContext = context?.applicationContext
+        val wifiManager = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
+
+        val candidateUrls = buildList {
+            if (!localIp.isNullOrBlank()) {
+                youtubeRedirectServer?.stopServer()
+                val srv = YouTubeRedirectHttpServer(localIp, watchUrl)
+                val port = srv.startServer()
+                if (port != null) {
+                    youtubeRedirectServer = srv
+                    add("http://$localIp:$port/watch?v=$videoId")
+                }
+            }
+            add(watchUrl)
+            add(mobileWatchUrl)
+        }.distinct()
 
         sendStopAction(controlUrl, serviceUrn)
 
-        val ytDidl =
-            """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>object.item.videoItem.videoBroadcast</upnp:class><res protocolInfo="http-get:*:video/mp4:*">$escapedUrl</res></item></DIDL-Lite>"""
-
-        fun buildSetUriSoap(metaDataXml: String): String = """
-            <?xml version="1.0" encoding="utf-8"?>
-            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-              <s:Body>
-                <u:SetAVTransportURI xmlns:u="$serviceUrn">
-                  <InstanceID>0</InstanceID>
-                  <CurrentURI>$escapedUrl</CurrentURI>
-                  <CurrentURIMetaData>${escapeXml(metaDataXml)}</CurrentURIMetaData>
-                </u:SetAVTransportURI>
-              </s:Body>
-            </s:Envelope>
-        """.trimIndent()
-
-        var setUriRes = sendSoapAction(
-            controlUrl = controlUrl,
-            soapAction = "\"$serviceUrn#SetAVTransportURI\"",
-            body = buildSetUriSoap(ytDidl)
-        )
-        if (!setUriRes.success) {
-            setUriRes = sendSoapAction(
+        var lastError = "TV DLNA ne YouTube link reject kiya"
+        for (candidateUrl in candidateUrls) {
+            val res = trySetUriAndPlay(
                 controlUrl = controlUrl,
-                soapAction = "\"$serviceUrn#SetAVTransportURI\"",
-                body = buildSetUriSoap("")
+                serviceUrn = serviceUrn,
+                mediaUrl = candidateUrl,
+                title = safeTitle,
+                mimeType = "video/mp4",
+                upnpClass = "object.item.videoItem.videoBroadcast"
             )
-        }
-        if (!setUriRes.success) {
-            return@withContext DlnaPlayResult(
-                false,
-                "YouTube DLNA SetURI fail (${setUriRes.message}) - Player fallback use karein"
-            )
+            if (res.success) {
+                return@withContext DlnaPlayResult(true, "${device.friendlyName} par bhej diya")
+            }
+            lastError = res.message
         }
 
-        delay(300)
-        return@withContext sendPlayAction(controlUrl, serviceUrn)
+        return@withContext DlnaPlayResult(
+            false,
+            "DLNA YouTube play nahi hua ($lastError) — TV par YouTube app use karein"
+        )
     }
 
-    /**
-     * Local device media (`content://` ya `file://`) ko local Wi-Fi HTTP stream ke zariye
-     * DLNA renderer par cast karta hai.
-     */
+    private fun tryLaunchYouTubeViaDial(dialBaseUrl: String, videoId: String): Boolean {
+        var conn: HttpURLConnection? = null
+        return try {
+            val base = dialBaseUrl.trimEnd('/')
+            val launchUrl = URL("$base/YouTube")
+            conn = (launchUrl.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 3000
+                readTimeout = 3000
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("User-Agent", USER_AGENT)
+                setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+            }
+            val payload = "v=$videoId"
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
+                writer.write(payload)
+                writer.flush()
+            }
+            conn.responseCode in 200..204
+        } catch (_: Exception) {
+            false
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
     suspend fun playLocalMediaOnDevice(
         device: DlnaDevice,
         uri: Uri,
@@ -426,6 +461,8 @@ class DlnaController(private val context: Context? = null) {
     fun releaseLocalMediaServer() {
         localMediaServer?.stopServer()
         localMediaServer = null
+        youtubeRedirectServer?.stopServer()
+        youtubeRedirectServer = null
     }
 
     suspend fun playMediaOnDevice(
@@ -453,20 +490,38 @@ class DlnaController(private val context: Context? = null) {
         }
         val safeTitle = title.trim().ifEmpty { "PlusCast IPTV" }
         val resolvedMime = resolveMimeType(cleanUrl, mimeType)
-
-        sendStopAction(controlUrl, serviceUrn)
-
-        val escapedUrl = escapeXml(cleanUrl)
-        val escapedTitle = escapeXml(safeTitle)
-        val escapedMime = escapeXml(resolvedMime)
-        val protocolInfo = "http-get:*:$escapedMime:*"
         val upnpClass = if (resolvedMime.startsWith("audio/", ignoreCase = true)) {
             "object.item.audioItem.musicTrack"
         } else {
             "object.item.videoItem"
         }
 
-        val rawDidl =
+        sendStopAction(controlUrl, serviceUrn)
+
+        return@withContext trySetUriAndPlay(
+            controlUrl = controlUrl,
+            serviceUrn = serviceUrn,
+            mediaUrl = cleanUrl,
+            title = safeTitle,
+            mimeType = resolvedMime,
+            upnpClass = upnpClass
+        )
+    }
+
+    private suspend fun trySetUriAndPlay(
+        controlUrl: String,
+        serviceUrn: String,
+        mediaUrl: String,
+        title: String,
+        mimeType: String,
+        upnpClass: String
+    ): DlnaPlayResult {
+        val escapedUrl = escapeXml(mediaUrl)
+        val escapedTitle = escapeXml(title)
+        val escapedMime = escapeXml(mimeType)
+        val protocolInfo = "http-get:*:$escapedMime:*"
+
+        val didl =
             """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>$upnpClass</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
 
         fun buildSetUriSoap(metaDataXml: String): String = """
@@ -485,7 +540,7 @@ class DlnaController(private val context: Context? = null) {
         var setUriRes = sendSoapAction(
             controlUrl = controlUrl,
             soapAction = "\"$serviceUrn#SetAVTransportURI\"",
-            body = buildSetUriSoap(rawDidl)
+            body = buildSetUriSoap(didl)
         )
 
         if (!setUriRes.success) {
@@ -497,11 +552,11 @@ class DlnaController(private val context: Context? = null) {
         }
 
         if (!setUriRes.success) {
-            return@withContext DlnaPlayResult(false, "SetURI fail: ${setUriRes.message}")
+            return DlnaPlayResult(false, "SetURI fail: ${setUriRes.message}")
         }
 
         delay(300)
-        return@withContext sendPlayAction(controlUrl, serviceUrn)
+        return sendPlayAction(controlUrl, serviceUrn)
     }
 
     private fun sendStopAction(controlUrl: String, serviceUrn: String) {
@@ -680,7 +735,7 @@ class DlnaController(private val context: Context? = null) {
         return null
     }
 
-    private fun parseDeviceDescription(locationUrl: String): DlnaDevice? {
+    private fun parseDeviceDescription(locationUrl: String, hintDialUrl: String): DlnaDevice? {
         var conn: HttpURLConnection? = null
         return try {
             val baseUrl = URL(locationUrl)
@@ -693,6 +748,7 @@ class DlnaController(private val context: Context? = null) {
             }
             if (conn.responseCode !in 200..299) return null
 
+            val headerDial = conn.getHeaderField("Application-URL")?.trim().orEmpty()
             val xml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
             val friendlyName = extractTagValue(xml, "friendlyName")
                 ?.trim()
@@ -707,10 +763,17 @@ class DlnaController(private val context: Context? = null) {
             }
             if (!isValidHttpUrl(resolvedControlUrl)) return null
 
+            val resolvedDialUrl = when {
+                headerDial.isNotBlank() && isValidHttpUrl(headerDial) -> headerDial
+                hintDialUrl.isNotBlank() && isValidHttpUrl(hintDialUrl) -> hintDialUrl
+                else -> ""
+            }
+
             DlnaDevice(
                 friendlyName = friendlyName,
                 controlUrl = resolvedControlUrl,
-                serviceType = serviceType ?: "urn:schemas-upnp-org:service:AVTransport:1"
+                serviceType = serviceType ?: "urn:schemas-upnp-org:service:AVTransport:1",
+                dialAppUrl = resolvedDialUrl
             )
         } catch (e: Exception) {
             Log.w(TAG, "Device description parse failed for $locationUrl", e)
@@ -811,10 +874,67 @@ class DlnaController(private val context: Context? = null) {
             .replace("'", "&apos;")
     }
 
-    /**
-     * Local media URI (`content://` ya `file://`) ko LAN par HTTP stream karne ke liye
-     * lightweight single-media HTTP relay server.
-     */
+    private class YouTubeRedirectHttpServer(
+        private val bindIp: String,
+        private val targetUrl: String
+    ) {
+        private val running = AtomicBoolean(false)
+        private var serverSocket: ServerSocket? = null
+        private var acceptThread: Thread? = null
+
+        fun startServer(): Int? {
+            return try {
+                val addr = InetAddress.getByName(bindIp)
+                val sock = ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(addr, 0), 8)
+                    soTimeout = 1000
+                }
+                serverSocket = sock
+                running.set(true)
+
+                acceptThread = Thread({
+                    while (running.get()) {
+                        try {
+                            val client = sock.accept()
+                            client.use { s ->
+                                val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
+                                reader.readLine() ?: return@use
+                                val resp = buildString {
+                                    append("HTTP/1.1 302 Found\r\n")
+                                    append("Location: $targetUrl\r\n")
+                                    append("Content-Length: 0\r\n")
+                                    append("Connection: close\r\n\r\n")
+                                }
+                                s.getOutputStream().write(resp.toByteArray(Charsets.ISO_8859_1))
+                                s.getOutputStream().flush()
+                            }
+                        } catch (_: SocketTimeoutException) {
+                        } catch (_: Exception) {
+                            if (!running.get()) break
+                        }
+                    }
+                }, "PlusCastYtRedirect").apply {
+                    isDaemon = true
+                    start()
+                }
+                sock.localPort
+            } catch (_: Exception) {
+                stopServer()
+                null
+            }
+        }
+
+        fun stopServer() {
+            running.set(false)
+            try {
+                serverSocket?.close()
+            } catch (_: Exception) {
+            }
+            serverSocket = null
+        }
+    }
+
     private class LocalMediaHttpServer(
         private val context: Context,
         private val bindIp: String,
@@ -966,7 +1086,6 @@ class DlnaController(private val context: Context? = null) {
                     }
                 }
             } catch (_: Exception) {
-                // Client disconnect ya stream close normal hai
             }
         }
 
