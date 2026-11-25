@@ -16,7 +16,9 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -31,6 +33,7 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -61,6 +64,17 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_LAST_URL = "last_watched_url"
         private const val KEY_LAST_TITLE = "last_watched_title"
 
+        // Casting extras
+        const val EXTRA_CAST_MODE = "CAST_MODE"
+        const val EXTRA_YOUTUBE_URL = "YOUTUBE_URL"
+        const val EXTRA_YOUTUBE_VIDEO_ID = "YOUTUBE_VIDEO_ID"
+        const val EXTRA_LOCAL_MEDIA_URI = "LOCAL_MEDIA_URI"
+        const val EXTRA_LOCAL_MEDIA_MIME = "LOCAL_MEDIA_MIME"
+
+        const val CAST_MODE_STREAM = "STREAM"
+        const val CAST_MODE_YOUTUBE = "YOUTUBE"
+        const val CAST_MODE_LOCAL = "LOCAL"
+
         // Daily auto-refresh interval (24 hours)
         private const val DAILY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
 
@@ -78,6 +92,7 @@ class MainActivity : AppCompatActivity() {
         private const val ACCENT_CYAN = "#00E5FF"
         private const val ACCENT_SKY = "#38BDF8"
         private const val ACCENT_GOLD = "#FBBF24"
+        private const val ACCENT_RED = "#FF4D6D"
         private const val TEXT_PRIMARY = "#F8FAFC"
         private const val TEXT_SECONDARY = "#94A3B8"
     }
@@ -85,6 +100,8 @@ class MainActivity : AppCompatActivity() {
     private val dlnaController by lazy { DlnaController(this) }
 
     private var tvDlnaStatus: TextView? = null
+    private var btnYouTubeCast: TextView? = null
+    private var btnLocalCast: TextView? = null
     private var tvLastWatched: TextView? = null
     private var tvChannelCount: TextView? = null
     private var etSearch: EditText? = null
@@ -101,6 +118,20 @@ class MainActivity : AppCompatActivity() {
 
     private var isLoadingPlaylist: Boolean = false
     private var dailyTickerJob: Job? = null
+
+    private val localMediaPickerLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+            if (uri == null) return@registerForActivityResult
+            try {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {
+                // Kuch providers persistable permission support nahi karte; current session ke liye URI valid rehta hai
+            }
+            handleLocalMediaSelected(uri)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -244,15 +275,19 @@ class MainActivity : AppCompatActivity() {
             letterSpacing = 0.04f
         }
 
-        val badgesRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val badgesScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
             val lp = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
             lp.topMargin = dp(6)
             layoutParams = lp
+        }
+
+        val badgesRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
 
         val dlnaBadge = TextView(this).apply {
@@ -271,6 +306,52 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
         tvDlnaStatus = dlnaBadge
+
+        val ytCastBadge = TextView(this).apply {
+            text = "▶ YT Cast"
+            setTextColor(Color.parseColor(ACCENT_RED))
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_SURFACE,
+                normalStroke = "#5E1F2D",
+                focusStroke = ACCENT_RED,
+                radiusDp = 999
+            )
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.marginStart = dp(8)
+            layoutParams = lp
+        }
+        btnYouTubeCast = ytCastBadge
+
+        val localCastBadge = TextView(this).apply {
+            text = "📁 Local Cast"
+            setTextColor(Color.parseColor(ACCENT_SKY))
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = BG_SURFACE,
+                normalStroke = "#1E3A5F",
+                focusStroke = ACCENT_SKY,
+                radiusDp = 999
+            )
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.marginStart = dp(8)
+            layoutParams = lp
+        }
+        btnLocalCast = localCastBadge
 
         val lastWatchedBadge = TextView(this).apply {
             visibility = View.GONE
@@ -298,7 +379,10 @@ class MainActivity : AppCompatActivity() {
         tvLastWatched = lastWatchedBadge
 
         badgesRow.addView(dlnaBadge)
+        badgesRow.addView(ytCastBadge)
+        badgesRow.addView(localCastBadge)
         badgesRow.addView(lastWatchedBadge)
+        badgesScroll.addView(badgesRow)
 
         val refreshBtn = TextView(this).apply {
             text = "↻ Refresh"
@@ -318,7 +402,7 @@ class MainActivity : AppCompatActivity() {
         btnRefresh = refreshBtn
 
         brandBlock.addView(tvTitle)
-        brandBlock.addView(badgesRow)
+        brandBlock.addView(badgesScroll)
         headerRow.addView(logoView)
         headerRow.addView(brandBlock)
         headerRow.addView(refreshBtn)
@@ -438,6 +522,14 @@ class MainActivity : AppCompatActivity() {
             discoverAndPickDlnaDevice()
         }
 
+        btnYouTubeCast?.setOnClickListener {
+            showYouTubeCastDialog()
+        }
+
+        btnLocalCast?.setOnClickListener {
+            openLocalMediaPicker()
+        }
+
         tvLastWatched?.setOnClickListener {
             val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
             val lastUrl = prefs.getString(KEY_LAST_URL, null)?.trim().orEmpty()
@@ -457,6 +549,278 @@ class MainActivity : AppCompatActivity() {
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
+    }
+
+    // ==================== YOUTUBE CASTING ====================
+
+    private fun showYouTubeCastDialog() {
+        val input = EditText(this).apply {
+            hint = "YouTube link ya Video ID paste karein..."
+            setHintTextColor(Color.parseColor(TEXT_SECONDARY))
+            setTextColor(Color.parseColor(TEXT_PRIMARY))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+            background = createFocusPillDrawable(
+                normalFill = BG_SURFACE,
+                normalStroke = BORDER_SUBTLE,
+                focusStroke = ACCENT_CYAN,
+                radiusDp = 12
+            )
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+
+        val wrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(4))
+            addView(input)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("YouTube Cast")
+            .setMessage("Video URL ya ID dalein. Agar DLNA device connected hai to uspar cast hoga.")
+            .setView(wrapper)
+            .setPositiveButton("Cast / Play") { _, _ ->
+                val raw = input.text?.toString()?.trim().orEmpty()
+                if (raw.isEmpty()) {
+                    Toast.makeText(this, "Kripya YouTube link ya ID dalein", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val videoId = extractYouTubeVideoId(raw)
+                if (videoId == null) {
+                    Toast.makeText(this, "Valid YouTube link ya ID nahi mila", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                castYouTubeVideo(rawInput = raw, videoId = videoId)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun extractYouTubeVideoId(input: String): String? {
+        val trimmed = input.trim()
+        // Direct 11-char video ID
+        if (trimmed.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) {
+            return trimmed
+        }
+        val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
+        val host = uri.host?.lowercase(Locale.US).orEmpty()
+
+        // youtu.be/<id>
+        if (host.contains("youtu.be")) {
+            val seg = uri.lastPathSegment?.trim().orEmpty()
+            if (seg.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return seg
+        }
+
+        // youtube.com/watch?v=<id>
+        uri.getQueryParameter("v")?.trim()?.let { v ->
+            if (v.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return v
+        }
+
+        // youtube.com/shorts/<id>, /embed/<id>, /live/<id>
+        val segments = uri.pathSegments.orEmpty()
+        for (i in 0 until segments.size - 1) {
+            val tag = segments[i].lowercase(Locale.US)
+            if (tag == "shorts" || tag == "embed" || tag == "live" || tag == "v") {
+                val candidate = segments[i + 1].trim()
+                if (candidate.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return candidate
+            }
+        }
+        return null
+    }
+
+    private fun castYouTubeVideo(rawInput: String, videoId: String) {
+        val normalizedUrl = if (rawInput.startsWith("http://", true) || rawInput.startsWith("https://", true)) {
+            rawInput
+        } else {
+            "https://www.youtube.com/watch?v=$videoId"
+        }
+        val title = "YouTube ($videoId)"
+
+        saveLastWatched(url = normalizedUrl, title = title)
+        updateLastWatchedPill()
+
+        val savedDevice = DlnaDeviceStore.getLastDevice(this)
+        if (savedDevice != null) {
+            Toast.makeText(
+                this,
+                "YouTube video ${savedDevice.friendlyName} par bhej rahe hain...",
+                Toast.LENGTH_SHORT
+            ).show()
+            lifecycleScope.launch {
+                val sentToDlna = dispatchCastToDlna(
+                    mediaUrl = normalizedUrl,
+                    title = title,
+                    mimeType = "video/mp4"
+                )
+                if (isFinishing || isDestroyed) return@launch
+                if (!sentToDlna) {
+                    launchPlayer(
+                        url = normalizedUrl,
+                        title = title,
+                        castMode = CAST_MODE_YOUTUBE,
+                        youtubeUrl = normalizedUrl,
+                        youtubeVideoId = videoId
+                    )
+                }
+            }
+        } else {
+            launchPlayer(
+                url = normalizedUrl,
+                title = title,
+                castMode = CAST_MODE_YOUTUBE,
+                youtubeUrl = normalizedUrl,
+                youtubeVideoId = videoId
+            )
+        }
+    }
+
+    // ==================== LOCAL MEDIA CASTING ====================
+
+    private fun openLocalMediaPicker() {
+        localMediaPickerLauncher.launch(arrayOf("video/*", "audio/*"))
+    }
+
+    private fun handleLocalMediaSelected(uri: Uri) {
+        val mimeType = contentResolver.getType(uri)
+            ?: guessMimeFromUri(uri)
+            ?: "video/*"
+        val displayName = resolveDisplayName(uri) ?: "Local Media"
+
+        saveLastWatched(url = uri.toString(), title = displayName)
+        updateLastWatchedPill()
+
+        val savedDevice = DlnaDeviceStore.getLastDevice(this)
+        if (savedDevice != null) {
+            AlertDialog.Builder(this)
+                .setTitle("Local Media Cast")
+                .setMessage("\"$displayName\" ko ${savedDevice.friendlyName} par cast karein ya phone player mein chalayein?")
+                .setPositiveButton("TV par Cast Karein") { _, _ ->
+                    lifecycleScope.launch {
+                        val sentToDlna = dispatchCastToDlna(
+                            mediaUrl = uri.toString(),
+                            title = displayName,
+                            mimeType = mimeType
+                        )
+                        if (isFinishing || isDestroyed) return@launch
+                        if (!sentToDlna) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "DLNA direct URI bhej nahi paya, player khol rahe hain",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            launchPlayer(
+                                url = uri.toString(),
+                                title = displayName,
+                                castMode = CAST_MODE_LOCAL,
+                                localMediaUri = uri.toString(),
+                                localMediaMime = mimeType
+                            )
+                        } else {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "$displayName → ${savedDevice.friendlyName}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+                .setNeutralButton("Player Mein Chalayein") { _, _ ->
+                    launchPlayer(
+                        url = uri.toString(),
+                        title = displayName,
+                        castMode = CAST_MODE_LOCAL,
+                        localMediaUri = uri.toString(),
+                        localMediaMime = mimeType
+                    )
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        } else {
+            launchPlayer(
+                url = uri.toString(),
+                title = displayName,
+                castMode = CAST_MODE_LOCAL,
+                localMediaUri = uri.toString(),
+                localMediaMime = mimeType
+            )
+        }
+    }
+
+    private fun resolveDisplayName(uri: Uri): String? {
+        return try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) cursor.getString(idx) else null
+                    } else null
+                }
+        } catch (_: Exception) {
+            null
+        } ?: uri.lastPathSegment
+    }
+
+    private fun guessMimeFromUri(uri: Uri): String? {
+        val lower = uri.toString().lowercase(Locale.US)
+        return when {
+            lower.endsWith(".mp4") || lower.endsWith(".m4v") -> "video/mp4"
+            lower.endsWith(".mkv") -> "video/x-matroska"
+            lower.endsWith(".webm") -> "video/webm"
+            lower.endsWith(".mp3") -> "audio/mpeg"
+            lower.endsWith(".m4a") || lower.endsWith(".aac") -> "audio/mp4"
+            lower.endsWith(".wav") -> "audio/wav"
+            lower.endsWith(".flac") -> "audio/flac"
+            else -> null
+        }
+    }
+
+    /**
+     * DlnaController ke public method ko safely invoke karta hai agar available ho,
+     * warna false return karta hai taaki fallback player launch ho sake.
+     */
+    private suspend fun dispatchCastToDlna(
+        mediaUrl: String,
+        title: String,
+        mimeType: String
+    ): Boolean {
+        val device = DlnaDeviceStore.getLastDevice(this) ?: return false
+        return withContext(Dispatchers.IO) {
+            val candidateMethods = listOf(
+                "castUrl",
+                "castMedia",
+                "playMedia",
+                "setAvTransportUri",
+                "playOnRenderer"
+            )
+            for (methodName in candidateMethods) {
+                val method = dlnaController.javaClass.methods.firstOrNull { m ->
+                    m.name == methodName && m.parameterCount in 2..4
+                } ?: continue
+                try {
+                    val result = when (method.parameterCount) {
+                        2 -> method.invoke(dlnaController, device, mediaUrl)
+                        3 -> method.invoke(dlnaController, device, mediaUrl, title)
+                        4 -> method.invoke(dlnaController, device, mediaUrl, title, mimeType)
+                        else -> null
+                    }
+                    if (result is Boolean) return@withContext result
+                    return@withContext true
+                } catch (_: Exception) {
+                    // Agla method try karein
+                }
+            }
+            false
+        }
+    }
+
+    // ==================== EXISTING FLOWS ====================
+
+    private fun saveLastWatched(url: String, title: String) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LAST_URL, url)
+            .putString(KEY_LAST_TITLE, title)
+            .apply()
     }
 
     private fun updateLastWatchedPill() {
@@ -695,17 +1059,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openChannelInPlayer(channel: IptvChannel) {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .edit()
-            .putString(KEY_LAST_URL, channel.url)
-            .putString(KEY_LAST_TITLE, channel.name)
-            .apply()
+        saveLastWatched(url = channel.url, title = channel.name)
         updateLastWatchedPill()
         launchPlayer(
             url = channel.url,
             title = channel.name,
             userAgent = channel.userAgent,
-            referrer = channel.referrer
+            referrer = channel.referrer,
+            castMode = CAST_MODE_STREAM
         )
     }
 
@@ -713,13 +1074,20 @@ class MainActivity : AppCompatActivity() {
         url: String,
         title: String,
         userAgent: String = "",
-        referrer: String = ""
+        referrer: String = "",
+        castMode: String = CAST_MODE_STREAM,
+        youtubeUrl: String = "",
+        youtubeVideoId: String = "",
+        localMediaUri: String = "",
+        localMediaMime: String = ""
     ) {
         val intent = Intent(this, PlayerActivity::class.java).apply {
             putExtra("MEDIA_URL", url)
             putExtra("MEDIA_TITLE", title)
             putExtra(PlayerActivity.EXTRA_MEDIA_URL, url)
             putExtra(PlayerActivity.EXTRA_MEDIA_TITLE, title)
+            putExtra(EXTRA_CAST_MODE, castMode)
+
             if (userAgent.isNotBlank()) {
                 putExtra("MEDIA_USER_AGENT", userAgent)
                 putExtra(PlayerActivity.EXTRA_MEDIA_USER_AGENT, userAgent)
@@ -727,6 +1095,19 @@ class MainActivity : AppCompatActivity() {
             if (referrer.isNotBlank()) {
                 putExtra("MEDIA_REFERRER", referrer)
                 putExtra(PlayerActivity.EXTRA_MEDIA_REFERRER, referrer)
+            }
+            if (youtubeUrl.isNotBlank()) {
+                putExtra(EXTRA_YOUTUBE_URL, youtubeUrl)
+            }
+            if (youtubeVideoId.isNotBlank()) {
+                putExtra(EXTRA_YOUTUBE_VIDEO_ID, youtubeVideoId)
+            }
+            if (localMediaUri.isNotBlank()) {
+                putExtra(EXTRA_LOCAL_MEDIA_URI, localMediaUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            if (localMediaMime.isNotBlank()) {
+                putExtra(EXTRA_LOCAL_MEDIA_MIME, localMediaMime)
             }
 
             val savedDevice = DlnaDeviceStore.getLastDevice(this@MainActivity)
@@ -762,7 +1143,6 @@ class MainActivity : AppCompatActivity() {
         val cardRect = RectF(pad, pad, f - pad, f - pad)
         val corner = f * 0.25f
 
-        // 1. Standard dark broadcast base with subtle vertical depth
         val basePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             shader = LinearGradient(
@@ -777,7 +1157,6 @@ class MainActivity : AppCompatActivity() {
         }
         canvas.drawRoundRect(cardRect, corner, corner, basePaint)
 
-        // Top subtle highlight sheen for polished app-icon depth
         val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             shader = LinearGradient(
@@ -793,7 +1172,6 @@ class MainActivity : AppCompatActivity() {
         val sheenRect = RectF(cardRect.left, cardRect.top, cardRect.right, cardRect.centerY() + f * 0.04f)
         canvas.drawRoundRect(sheenRect, corner, corner, sheenPaint)
 
-        // Crisp outer border
         val outerBorder = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = (f * 0.024f).coerceAtLeast(1.1f)
@@ -801,7 +1179,6 @@ class MainActivity : AppCompatActivity() {
         }
         canvas.drawRoundRect(cardRect, corner, corner, outerBorder)
 
-        // 2. Centered TV / Cast Screen Frame
         val tvLeft = f * 0.21f
         val tvTop = f * 0.25f
         val tvRight = f * 0.79f
@@ -823,7 +1200,6 @@ class MainActivity : AppCompatActivity() {
         canvas.drawRoundRect(tvRect, tvRadius, tvRadius, tvFill)
         canvas.drawRoundRect(tvRect, tvRadius, tvRadius, tvStroke)
 
-        // 3. Cast / Signal Arcs (left side inside screen)
         val wavePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = (f * 0.032f).coerceAtLeast(1.25f)
@@ -839,7 +1215,6 @@ class MainActivity : AppCompatActivity() {
             -70f, 70f, false, wavePaint
         )
 
-        // 4. Balanced Play Triangle
         val playPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             color = Color.parseColor(ACCENT_CYAN)
@@ -852,7 +1227,6 @@ class MainActivity : AppCompatActivity() {
         }
         canvas.drawPath(playPath, playPaint)
 
-        // 5. Live Gold Dot
         val liveDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             color = Color.parseColor(ACCENT_GOLD)
@@ -864,7 +1238,6 @@ class MainActivity : AppCompatActivity() {
             liveDotPaint
         )
 
-        // 6. Clean Broadcast Stand Below Screen
         val standPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeWidth = (f * 0.040f).coerceAtLeast(1.5f)
