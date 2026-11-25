@@ -270,17 +270,18 @@ class MainActivity : AppCompatActivity() {
         val tb = toolbarView ?: return
         setSupportActionBar(tb)
         supportActionBar?.setDisplayShowTitleEnabled(false)
-        tb.menu.clear()
-        tb.inflateMenu(R.menu.menu_cast)
-        runCatching {
-            CastButtonFactory.setUpMediaRouteButton(
-                applicationContext,
-                tb.menu,
-                R.id.media_route_menu_item
-            )
-        }
         tb.setOnMenuItemClickListener { menuItem ->
-            onOptionsItemSelected(menuItem)
+            when (menuItem.itemId) {
+                R.id.action_cast_youtube -> {
+                    showYouTubeCastDialog()
+                    true
+                }
+                R.id.action_cast_local -> {
+                    openLocalMediaPicker()
+                    true
+                }
+                else -> false
+            }
         }
     }
 
