@@ -1,5 +1,6 @@
 package com.pluscast.tvcast
 
+import android.app.Dialog
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
@@ -13,6 +14,7 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
@@ -211,6 +213,14 @@ class MainActivity : AppCompatActivity() {
         } else {
             tvChannelCount?.text = "Playlist link configure karein"
         }
+
+        handleIncomingYouTubeOrShareIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingYouTubeOrShareIntent(intent)
     }
 
     override fun onStart() {
@@ -705,6 +715,109 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    // ==================== EXTERNAL SHARE / INTENT HANDLING ====================
+
+    private fun handleIncomingYouTubeOrShareIntent(incoming: Intent?) {
+        val intent = incoming ?: return
+        val sharedText = when (intent.action) {
+            Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+            Intent.ACTION_VIEW -> intent.dataString.orEmpty()
+            else -> ""
+        }.trim()
+
+        if (sharedText.isEmpty()) return
+
+        val extractedUrl = Regex("https?://\\S+")
+            .find(sharedText)
+            ?.value
+            ?.trim(')', ']', '>', '"', '\'', ',')
+            ?: sharedText
+
+        val videoId = M3uPlaylistParser.extractYouTubeVideoId(extractedUrl).orEmpty()
+        if (videoId.isEmpty()) return
+
+        castYouTubeVideoToActiveTarget(
+            videoId = videoId,
+            title = "YouTube ($videoId)",
+            sourceUrl = "https://www.youtube.com/watch?v=$videoId"
+        )
+    }
+
+    private fun castYouTubeVideoToActiveTarget(
+        videoId: String,
+        title: String,
+        sourceUrl: String
+    ) {
+        val ytWatchUrl = "https://www.youtube.com/watch?v=$videoId"
+        saveLastWatched(url = sourceUrl, title = title)
+        updateLastWatchedPill()
+
+        val activeCast = getActiveCastSession()
+        val savedDevice = DlnaDeviceStore.getLastDevice(this)
+
+        if (activeCast == null && savedDevice == null) {
+            Toast.makeText(
+                this,
+                "Pehle DLNA TV ya Cast device chunein",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        Toast.makeText(this, "TV par cast bhej rahe hain...", Toast.LENGTH_SHORT).show()
+
+        lifecycleScope.launch {
+            var anySuccess = false
+            var lastMsg = ""
+
+            if (activeCast != null) {
+                val castLoaded = runCatching {
+                    val mediaInfo = MediaInfo.Builder(ytWatchUrl)
+                        .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+                        .setContentType("video/mp4")
+                        .setMetadata(
+                            MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+                                putString(MediaMetadata.KEY_TITLE, title)
+                            }
+                        )
+                        .build()
+                    val req = MediaLoadRequestData.Builder()
+                        .setMediaInfo(mediaInfo)
+                        .setAutoplay(true)
+                        .build()
+                    activeCast.remoteMediaClient?.load(req)
+                    true
+                }.getOrElse { false }
+                if (castLoaded) {
+                    anySuccess = true
+                    lastMsg = "${activeCast.castDevice?.friendlyName ?: "Cast TV"} par bhej diya"
+                }
+            }
+
+            if (savedDevice != null) {
+                val dlnaRes = dlnaController.playYouTubeOnDevice(
+                    device = savedDevice,
+                    youtubeUrlOrId = videoId,
+                    title = title
+                )
+                if (dlnaRes.success) {
+                    anySuccess = true
+                    lastMsg = dlnaRes.message
+                } else if (!anySuccess) {
+                    lastMsg = dlnaRes.message
+                }
+            }
+
+            if (!isFinishing && !isDestroyed) {
+                Toast.makeText(
+                    this@MainActivity,
+                    lastMsg.ifBlank { "Cast bhej nahi paye" },
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
     // ==================== IN-APP YOUTUBE BROWSER (TUBIO STYLE) ====================
 
     private fun triggerDirectYouTubeFlow() {
@@ -720,6 +833,8 @@ class MainActivity : AppCompatActivity() {
         updateLastWatchedPill()
 
         CookieManager.getInstance().setAcceptCookie(true)
+
+        val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -750,16 +865,6 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        val btnOpenExternal = TextView(this).apply {
-            text = "Browser"
-            setTextColor(Color.parseColor(ACCENT_SKY))
-            textSize = 12f
-            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            isClickable = true
-            isFocusable = true
-            setPadding(dp(8), dp(6), dp(8), dp(6))
-        }
-
         val btnCastCurrent = TextView(this).apply {
             text = "Cast TV"
             setTextColor(Color.parseColor(ACCENT_CYAN))
@@ -767,7 +872,7 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             isClickable = true
             isFocusable = true
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
         }
 
         val btnClose = TextView(this).apply {
@@ -777,11 +882,10 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             isClickable = true
             isFocusable = true
-            setPadding(dp(10), dp(4), dp(4), dp(4))
+            setPadding(dp(12), dp(4), dp(6), dp(4))
         }
 
         topBar.addView(tvUrl)
-        topBar.addView(btnOpenExternal)
         topBar.addView(btnCastCurrent)
         topBar.addView(btnClose)
 
@@ -803,6 +907,7 @@ class MainActivity : AppCompatActivity() {
                 1f
             )
             setBackgroundColor(Color.parseColor(BG_PRIMARY))
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
             isFocusable = true
             isFocusableInTouchMode = true
             settings.apply {
@@ -822,6 +927,17 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): Boolean {
+                    val targetUrl = request?.url?.toString().orEmpty()
+                    if (targetUrl.startsWith("http://", true) || targetUrl.startsWith("https://", true)) {
+                        return false
+                    }
+                    return true
+                }
+
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     progress.visibility = View.VISIBLE
@@ -902,18 +1018,12 @@ class MainActivity : AppCompatActivity() {
         container.addView(progress)
         container.addView(webView)
 
-        val dialog = AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen)
-            .setView(container)
-            .create()
-
-        btnOpenExternal.setOnClickListener {
-            val target = webView.url?.trim().orEmpty().ifEmpty { normalizedStart }
-            runCatching {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
-            }.onFailure {
-                Toast.makeText(this, "Browser open nahi ho saka", Toast.LENGTH_SHORT).show()
-            }
-        }
+        dialog.setContentView(container)
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.parseColor(BG_PRIMARY)))
 
         btnClose.setOnClickListener {
             runCatching {
@@ -939,70 +1049,11 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            val ytWatchUrl = "https://www.youtube.com/watch?v=$videoId"
-            saveLastWatched(url = currentUrl, title = currentTitle)
-            updateLastWatchedPill()
-
-            val activeCast = getActiveCastSession()
-            val savedDevice = DlnaDeviceStore.getLastDevice(this)
-
-            if (activeCast == null && savedDevice == null) {
-                Toast.makeText(this, "Pehle DLNA TV ya Cast device chunein", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-
-            Toast.makeText(this, "TV par cast bhej rahe hain...", Toast.LENGTH_SHORT).show()
-
-            lifecycleScope.launch {
-                var anySuccess = false
-                var lastMsg = ""
-
-                if (activeCast != null) {
-                    val castLoaded = runCatching {
-                        val mediaInfo = MediaInfo.Builder(ytWatchUrl)
-                            .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
-                            .setContentType("video/mp4")
-                            .setMetadata(
-                                MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
-                                    putString(MediaMetadata.KEY_TITLE, currentTitle)
-                                }
-                            )
-                            .build()
-                        val req = MediaLoadRequestData.Builder()
-                            .setMediaInfo(mediaInfo)
-                            .setAutoplay(true)
-                            .build()
-                        activeCast.remoteMediaClient?.load(req)
-                        true
-                    }.getOrElse { false }
-                    if (castLoaded) {
-                        anySuccess = true
-                        lastMsg = "${activeCast.castDevice?.friendlyName ?: "Cast TV"} par bhej diya"
-                    }
-                }
-
-                if (savedDevice != null) {
-                    val dlnaRes = dlnaController.playYouTubeOnDevice(
-                        device = savedDevice,
-                        youtubeUrlOrId = videoId,
-                        title = currentTitle
-                    )
-                    if (dlnaRes.success) {
-                        anySuccess = true
-                        lastMsg = dlnaRes.message
-                    } else if (!anySuccess) {
-                        lastMsg = dlnaRes.message
-                    }
-                }
-
-                if (!isFinishing && !isDestroyed) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        lastMsg.ifBlank { "Cast bhej nahi paye" },
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            }
+            castYouTubeVideoToActiveTarget(
+                videoId = videoId,
+                title = currentTitle,
+                sourceUrl = currentUrl
+            )
         }
 
         dialog.setOnDismissListener {
