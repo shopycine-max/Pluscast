@@ -112,7 +112,6 @@ class DlnaController(private val context: Context? = null) {
     }
 
     private var localMediaServer: LocalMediaHttpServer? = null
-    private var youtubeRedirectServer: YouTubeRedirectHttpServer? = null
 
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
@@ -306,35 +305,20 @@ class DlnaController(private val context: Context? = null) {
     }
 
     /**
-     * YouTube video ko TV par bhejta hai:
-     * 1) Saved/discovered DIAL URL ya TV host ke common DIAL endpoints (8008 / desc XML)
-     *    se `YouTube` app `v=<videoId>` ke saath launch karne ki koshish karta hai.
-     * 2) LAN HTTP redirect endpoint (`http://<ip>:<port>/watch?v=<id>`) aur direct watch URL
-     *    ke zariye UPnP AVTransport `SetAVTransportURI` + `Play` try karta hai.
+     * YouTube video ko TV par DIAL ke zariye YouTube app mein launch karne ki koshish karta hai.
+     * Direct DLNA AVTransport watch-URL fallback nahi bhejta kyunki TV AVTransport HTML watch page
+     * ko direct video stream samajh kar 1-3 sec buffer karke fail kar deta hai.
      */
     suspend fun playYouTubeOnDevice(
         device: DlnaDevice,
         youtubeUrlOrId: String,
-        title: String = "YouTube Video"
+        @Suppress("UNUSED_PARAMETER") title: String = "YouTube Video"
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val videoId = extractYouTubeVideoId(youtubeUrlOrId)
             ?: return@withContext DlnaPlayResult(
                 false,
                 "Pehle koi YouTube video open karein (video link/ID nahi mila)"
             )
-
-        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-        val mobileWatchUrl = "https://m.youtube.com/watch?v=$videoId"
-
-        val controlUrl = device.controlUrl.trim()
-        if (controlUrl.isBlank() || !isValidHttpUrl(controlUrl)) {
-            return@withContext DlnaPlayResult(false, "Invalid or missing Control URL")
-        }
-
-        val serviceUrn = device.serviceType.trim().ifBlank {
-            "urn:schemas-upnp-org:service:AVTransport:1"
-        }
-        val safeTitle = title.trim().ifEmpty { "YouTube ($videoId)" }
 
         val dialCandidates = resolveDialBaseUrls(device)
         for (dialBase in dialCandidates) {
@@ -346,45 +330,9 @@ class DlnaController(private val context: Context? = null) {
             }
         }
 
-        val appContext = context?.applicationContext
-        val wifiManager = appContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-        val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
-
-        val candidateUrls = buildList {
-            if (!localIp.isNullOrBlank()) {
-                youtubeRedirectServer?.stopServer()
-                val srv = YouTubeRedirectHttpServer(localIp, watchUrl)
-                val port = srv.startServer()
-                if (port != null) {
-                    youtubeRedirectServer = srv
-                    add("http://$localIp:$port/watch?v=$videoId")
-                }
-            }
-            add(watchUrl)
-            add(mobileWatchUrl)
-        }.distinct()
-
-        sendStopAction(controlUrl, serviceUrn)
-
-        var lastError = "TV DLNA ne YouTube link reject kiya"
-        for (candidateUrl in candidateUrls) {
-            val res = trySetUriAndPlay(
-                controlUrl = controlUrl,
-                serviceUrn = serviceUrn,
-                mediaUrl = candidateUrl,
-                title = safeTitle,
-                mimeType = "video/mp4",
-                upnpClass = "object.item.videoItem.videoBroadcast"
-            )
-            if (res.success) {
-                return@withContext DlnaPlayResult(true, "${device.friendlyName} par bhej diya")
-            }
-            lastError = res.message
-        }
-
         return@withContext DlnaPlayResult(
             false,
-            "TV par direct YouTube launch/play nahi hua ($lastError) — TV ke YouTube app ya Cast button ka upyog karein"
+            "Is DLNA TV par direct YouTube web link play nahi hota — TV ke YouTube app ya Cast button ka upyog karein"
         )
     }
 
@@ -518,8 +466,6 @@ class DlnaController(private val context: Context? = null) {
     fun releaseLocalMediaServer() {
         localMediaServer?.stopServer()
         localMediaServer = null
-        youtubeRedirectServer?.stopServer()
-        youtubeRedirectServer = null
     }
 
     suspend fun playMediaOnDevice(
@@ -929,67 +875,6 @@ class DlnaController(private val context: Context? = null) {
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&apos;")
-    }
-
-    private class YouTubeRedirectHttpServer(
-        private val bindIp: String,
-        private val targetUrl: String
-    ) {
-        private val running = AtomicBoolean(false)
-        private var serverSocket: ServerSocket? = null
-        private var acceptThread: Thread? = null
-
-        fun startServer(): Int? {
-            return try {
-                val addr = InetAddress.getByName(bindIp)
-                val sock = ServerSocket().apply {
-                    reuseAddress = true
-                    bind(InetSocketAddress(addr, 0), 8)
-                    soTimeout = 1000
-                }
-                serverSocket = sock
-                running.set(true)
-
-                acceptThread = Thread({
-                    while (running.get()) {
-                        try {
-                            val client = sock.accept()
-                            client.use { s ->
-                                val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
-                                reader.readLine() ?: return@use
-                                val resp = buildString {
-                                    append("HTTP/1.1 302 Found\r\n")
-                                    append("Location: $targetUrl\r\n")
-                                    append("Content-Length: 0\r\n")
-                                    append("Connection: close\r\n\r\n")
-                                }
-                                s.getOutputStream().write(resp.toByteArray(Charsets.ISO_8859_1))
-                                s.getOutputStream().flush()
-                            }
-                        } catch (_: SocketTimeoutException) {
-                        } catch (_: Exception) {
-                            if (!running.get()) break
-                        }
-                    }
-                }, "PlusCastYtRedirect").apply {
-                    isDaemon = true
-                    start()
-                }
-                sock.localPort
-            } catch (_: Exception) {
-                stopServer()
-                null
-            }
-        }
-
-        fun stopServer() {
-            running.set(false)
-            try {
-                serverSocket?.close()
-            } catch (_: Exception) {
-            }
-            serverSocket = null
-        }
     }
 
     private class LocalMediaHttpServer(
