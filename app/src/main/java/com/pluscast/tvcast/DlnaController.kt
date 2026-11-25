@@ -218,7 +218,10 @@ class DlnaController(private val context: Context? = null) {
                             val text = String(respPacket.data, 0, respPacket.length, Charsets.UTF_8)
                             val loc = extractHeader(text, "LOCATION")?.trim()?.takeIf { isValidHttpUrl(it) }
                             if (loc != null) {
-                                val dialUrl = extractHeader(text, "APPLICATION-URL")?.trim().orEmpty()
+                                val dialUrl = (
+                                    extractHeader(text, "APPLICATION-URL")
+                                        ?: extractHeader(text, "X-DIAL_URL")
+                                    )?.trim().orEmpty()
                                 val existingDial = locations[loc].orEmpty()
                                 locations[loc] = existingDial.ifBlank { dialUrl }
                                 Log.d(TAG, "SSDP LOCATION: $loc | DIAL: ${locations[loc]}")
@@ -321,6 +324,8 @@ class DlnaController(private val context: Context? = null) {
             )
 
         val dialCandidates = resolveDialBaseUrls(device)
+        Log.d(TAG, "Trying DIAL YouTube launch for videoId=$videoId on ${device.friendlyName}: $dialCandidates")
+
         for (dialBase in dialCandidates) {
             if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
                 return@withContext DlnaPlayResult(
@@ -347,7 +352,8 @@ class DlnaController(private val context: Context? = null) {
             val descUrls = listOf(
                 "http://$host:8008/ssdp/device-desc.xml",
                 "http://$host:8060/dial/dd.xml",
-                "http://$host:56789/dial/dd.xml"
+                "http://$host:56789/dial/dd.xml",
+                "http://$host:7676/smp_2_"
             )
             for (descUrl in descUrls) {
                 val dialFromHeader = probeDialApplicationUrl(descUrl)
@@ -355,8 +361,12 @@ class DlnaController(private val context: Context? = null) {
                     urls.add(dialFromHeader.trim().trimEnd('/'))
                 }
             }
-            urls.add("http://$host:8008/apps")
-            urls.add("http://$host:8008/ws/apps")
+            val commonPorts = listOf(8008, 8060, 56789, 7676, 8009, 9197)
+            for (port in commonPorts) {
+                urls.add("http://$host:$port/apps")
+                urls.add("http://$host:$port/ws/apps")
+                urls.add("http://$host:$port/dial/apps")
+            }
         }
         return urls.toList()
     }
@@ -372,7 +382,17 @@ class DlnaController(private val context: Context? = null) {
                 setRequestProperty("User-Agent", USER_AGENT)
             }
             if (conn.responseCode !in 200..299) return null
-            conn.getHeaderField("Application-URL")?.trim()?.takeIf { isValidHttpUrl(it) }
+            val headerUrl = (
+                conn.getHeaderField("Application-URL")
+                    ?: conn.getHeaderField("X-DIAL_URL")
+                )?.trim()?.takeIf { isValidHttpUrl(it) }
+            if (headerUrl != null) return headerUrl
+
+            val xml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
+            (
+                extractTagValue(xml, "dial")
+                    ?: extractTagValue(xml, "applicationURL")
+                )?.trim()?.takeIf { isValidHttpUrl(it) }
         } catch (_: Exception) {
             null
         } finally {
@@ -381,34 +401,62 @@ class DlnaController(private val context: Context? = null) {
     }
 
     private fun tryLaunchYouTubeViaDial(dialBaseUrl: String, videoId: String): Boolean {
+        val base = dialBaseUrl.trimEnd('/')
         val appEndpoints = listOf(
-            "${dialBaseUrl.trimEnd('/')}/YouTube",
-            "${dialBaseUrl.trimEnd('/')}/youtube"
+            "$base/YouTube",
+            "$base/youtube"
         )
         for (endpoint in appEndpoints) {
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 2500
-                    readTimeout = 2500
-                    requestMethod = "POST"
-                    doOutput = true
-                    instanceFollowRedirects = false
-                    setRequestProperty("User-Agent", USER_AGENT)
-                    setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+            val postOk = runCatching {
+                var conn: HttpURLConnection? = null
+                try {
+                    conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 2500
+                        readTimeout = 2500
+                        requestMethod = "POST"
+                        doOutput = true
+                        instanceFollowRedirects = false
+                        setRequestProperty("User-Agent", USER_AGENT)
+                        setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                    }
+                    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
+                        writer.write("v=$videoId")
+                        writer.flush()
+                    }
+                    val code = conn.responseCode
+                    Log.d(TAG, "DIAL POST $endpoint -> HTTP $code")
+                    code in 200..204
+                } finally {
+                    conn?.disconnect()
                 }
-                val payload = "v=$videoId"
-                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
-                    writer.write(payload)
-                    writer.flush()
+            }.getOrElse { false }
+            if (postOk) return true
+
+            val queryPostOk = runCatching {
+                var conn: HttpURLConnection? = null
+                try {
+                    val qUrl = "$endpoint?v=$videoId"
+                    conn = (URL(qUrl).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 2500
+                        readTimeout = 2500
+                        requestMethod = "POST"
+                        doOutput = true
+                        instanceFollowRedirects = false
+                        setRequestProperty("User-Agent", USER_AGENT)
+                        setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                    }
+                    OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
+                        writer.write("v=$videoId")
+                        writer.flush()
+                    }
+                    val code = conn.responseCode
+                    Log.d(TAG, "DIAL POST $qUrl -> HTTP $code")
+                    code in 200..204
+                } finally {
+                    conn?.disconnect()
                 }
-                if (conn.responseCode in 200..204) {
-                    return true
-                }
-            } catch (_: Exception) {
-            } finally {
-                conn?.disconnect()
-            }
+            }.getOrElse { false }
+            if (queryPostOk) return true
         }
         return false
     }
@@ -751,7 +799,10 @@ class DlnaController(private val context: Context? = null) {
             }
             if (conn.responseCode !in 200..299) return null
 
-            val headerDial = conn.getHeaderField("Application-URL")?.trim().orEmpty()
+            val headerDial = (
+                conn.getHeaderField("Application-URL")
+                    ?: conn.getHeaderField("X-DIAL_URL")
+                )?.trim().orEmpty()
             val xml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
             val friendlyName = extractTagValue(xml, "friendlyName")
                 ?.trim()
@@ -766,8 +817,14 @@ class DlnaController(private val context: Context? = null) {
             }
             if (!isValidHttpUrl(resolvedControlUrl)) return null
 
+            val xmlDial = (
+                extractTagValue(xml, "dial")
+                    ?: extractTagValue(xml, "applicationURL")
+                )?.trim().orEmpty()
+
             val resolvedDialUrl = when {
                 headerDial.isNotBlank() && isValidHttpUrl(headerDial) -> headerDial
+                xmlDial.isNotBlank() && isValidHttpUrl(xmlDial) -> xmlDial
                 hintDialUrl.isNotBlank() && isValidHttpUrl(hintDialUrl) -> hintDialUrl
                 else -> ""
             }
