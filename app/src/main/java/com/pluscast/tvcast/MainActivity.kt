@@ -144,7 +144,7 @@ class MainActivity : AppCompatActivity() {
         override fun onSessionEnded(session: CastSession, errorCode: Int) {
             updateCastStatusIndicator()
         }
-        override fun onSessionResuming(session: CastSession, wasSuspended: Boolean) = Unit
+        override fun onSessionResuming(session: CastSession, sessionId: String) = Unit
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
             updateCastStatusIndicator()
         }
