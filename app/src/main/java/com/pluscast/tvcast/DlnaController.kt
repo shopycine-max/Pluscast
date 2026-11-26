@@ -307,11 +307,6 @@ class DlnaController(
         )
     }
 
-    /**
-     * 1) DIAL ke zariye TV ke YouTube app mein video launch karne ki koshish karta hai.
-     * 2) Agar DIAL available nahi hai aur koi direct playable stream URL (`streamResolver`)
-     *    milta hai, to us stream URL ko DLNA AVTransport par play karta hai.
-     */
     suspend fun playYouTubeOnDevice(
         device: DlnaDevice,
         youtubeUrlOrId: String,
@@ -394,9 +389,9 @@ class DlnaController(
                 "http://$host:56789/dial/dd.xml"
             )
             for (descUrl in descUrls) {
-                val dialFromHeader = probeDialApplicationUrl(descUrl)
-                if (!dialFromHeader.isNullOrBlank()) {
-                    addDialBase(dialFromHeader)
+                val dialFromDesc = probeDialApplicationUrl(descUrl)
+                if (!dialFromDesc.isNullOrBlank()) {
+                    addDialBase(dialFromDesc)
                 }
             }
             addDialBase("http://$host:8008/apps")
