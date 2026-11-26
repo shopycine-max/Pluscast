@@ -480,6 +480,7 @@ class DlnaController(
         }
 
         val payloads = listOf(
+            "{\"v\":\"$videoId\"}" to "application/json; charset=utf-8",
             "v=$videoId" to "text/plain; charset=utf-8",
             "v=$videoId&t=0" to "text/plain; charset=utf-8",
             "v=$videoId" to "application/x-www-form-urlencoded; charset=utf-8"
@@ -518,7 +519,7 @@ class DlnaController(
                         }
                         Log.d(
                             TAG,
-                            "DIAL POST $endpoint ($payload) -> HTTP $code | Location=${loc.ifBlank { "-" }} | err=${errBody.take(180).ifBlank { "-" }}"
+                            "DIAL POST $endpoint ($contentType, $payload) -> HTTP $code | Location=${loc.ifBlank { "-" }} | err=${errBody.take(180).ifBlank { "-" }}"
                         )
                         Triple(code in 200..204, code, loc)
                     } finally {
@@ -534,13 +535,16 @@ class DlnaController(
                     anyAccepted = true
                     lastAcceptedDetail = "HTTP $code on $endpoint"
                     val statusUrl = resolveDialStatusUrl(endpoint, locHeader)
-                    delay(600)
-                    if (isDialAppRunning(statusUrl)) {
-                        return DialLaunchOutcome(
-                            accepted = true,
-                            runningVerified = true,
-                            detail = "$lastAcceptedDetail (state=running at $statusUrl)"
-                        )
+
+                    repeat(3) { attempt ->
+                        delay(if (attempt == 0) 900L else 1000L)
+                        if (isDialAppRunning(statusUrl)) {
+                            return DialLaunchOutcome(
+                                accepted = true,
+                                runningVerified = true,
+                                detail = "$lastAcceptedDetail (state=running at $statusUrl)"
+                            )
+                        }
                     }
                 }
             }
