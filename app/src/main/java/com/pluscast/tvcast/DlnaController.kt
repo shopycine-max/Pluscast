@@ -116,6 +116,12 @@ class DlnaController(
 
     private var localMediaServer: LocalMediaHttpServer? = null
 
+    private data class DialLaunchOutcome(
+        val accepted: Boolean,
+        val runningVerified: Boolean,
+        val detail: String
+    )
+
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
             val found = linkedMapOf<String, DlnaDevice>()
@@ -319,13 +325,22 @@ class DlnaController(
             )
 
         val dialCandidates = resolveDialBaseUrls(device)
-        Log.d(TAG, "YouTube videoId=$videoId | DIAL candidates=$dialCandidates")
+        Log.d(TAG, "YouTube videoId=$videoId | device=${device.friendlyName} | DIAL candidates=$dialCandidates")
+
+        var acceptedAnyRequest = false
+        var lastDetail = "No DIAL response"
 
         for (dialBase in dialCandidates) {
-            if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
+            val outcome = tryLaunchYouTubeViaDial(dialBase, videoId)
+            if (outcome.accepted) {
+                acceptedAnyRequest = true
+                lastDetail = outcome.detail
+            }
+            if (outcome.runningVerified) {
+                Log.i(TAG, "DIAL YouTube confirmed running on ${device.friendlyName} (${outcome.detail})")
                 return@withContext DlnaPlayResult(
                     true,
-                    "${device.friendlyName} ke YouTube app mein video open ho raha hai"
+                    "${device.friendlyName} par YouTube launch request bheji gayi aur app running mila — agar video screen par na chale to TV par YouTube app check karein"
                 )
             }
         }
@@ -344,10 +359,22 @@ class DlnaController(
                 mimeType = resolveMimeType(resolvedStreamUrl, "video/mp4")
             )
             if (playRes.success) {
-                return@withContext DlnaPlayResult(true, "${device.friendlyName} par chal raha hai")
+                Log.i(TAG, "DLNA AVTransport stream started on ${device.friendlyName} for videoId=$videoId")
+                return@withContext DlnaPlayResult(true, "${device.friendlyName} par DLNA stream bheja gaya")
             }
             Log.w(TAG, "DLNA YouTube stream play failed: ${playRes.message}")
             return@withContext DlnaPlayResult(false, "TV stream play fail: ${playRes.message}")
+        }
+
+        if (acceptedAnyRequest) {
+            Log.w(
+                TAG,
+                "DIAL POST accepted on ${device.friendlyName} ($lastDetail), but app state 'running' verify nahi hua"
+            )
+            return@withContext DlnaPlayResult(
+                false,
+                "${device.friendlyName} ne request accept ki ($lastDetail), par YouTube running verify nahi hua — TV par YouTube app check karein"
+            )
         }
 
         Log.w(TAG, "DIAL launch failed and no direct stream URL resolved for videoId=$videoId on ${device.friendlyName}")
@@ -414,26 +441,34 @@ class DlnaController(
                     setRequestProperty("User-Agent", USER_AGENT)
                 }
                 connection = conn
-                if (conn.responseCode !in 200..299) return null
+                if (conn.responseCode !in 200..299) {
+                    Log.d(TAG, "DIAL probe $descUrl -> HTTP ${conn.responseCode}")
+                    return null
+                }
 
                 val headerUrl = conn.getHeaderField("Application-URL")?.trim()
                 if (!headerUrl.isNullOrBlank() && isValidHttpUrl(headerUrl)) {
+                    Log.d(TAG, "DIAL Application-URL from $descUrl -> $headerUrl")
                     return headerUrl
                 }
 
                 val xml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
                 val xmlAppUrl = extractTagValue(xml, "applicationURL")?.trim()
                 if (!xmlAppUrl.isNullOrBlank() && isValidHttpUrl(xmlAppUrl)) {
+                    Log.d(TAG, "DIAL <applicationURL> from $descUrl -> $xmlAppUrl")
                     return xmlAppUrl
                 }
                 null
             } finally {
                 connection?.disconnect()
             }
-        }.getOrNull()
+        }.getOrElse { e ->
+            Log.d(TAG, "DIAL probe error on $descUrl: ${e.message}")
+            null
+        }
     }
 
-    private fun tryLaunchYouTubeViaDial(dialBaseUrl: String, videoId: String): Boolean {
+    private suspend fun tryLaunchYouTubeViaDial(dialBaseUrl: String, videoId: String): DialLaunchOutcome {
         val cleanBase = dialBaseUrl.trim().trimEnd('/')
         val appEndpoints = linkedSetOf(
             "$cleanBase/YouTube",
@@ -450,9 +485,12 @@ class DlnaController(
             "v=$videoId" to "application/x-www-form-urlencoded; charset=utf-8"
         )
 
+        var anyAccepted = false
+        var lastAcceptedDetail = ""
+
         for (endpoint in appEndpoints) {
             for ((payload, contentType) in payloads) {
-                val launched = runCatching {
+                val postResult = runCatching {
                     var connection: HttpURLConnection? = null
                     try {
                         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
@@ -470,20 +508,87 @@ class DlnaController(
                             writer.flush()
                         }
                         val code = conn.responseCode
-                        val loc = conn.getHeaderField("Location")
-                        Log.d(TAG, "DIAL POST $endpoint ($payload) -> HTTP $code | Location=$loc")
-                        code in 200..204
+                        val loc = conn.getHeaderField("Location")?.trim().orEmpty()
+                        val errBody = if (code !in 200..299) {
+                            runCatching {
+                                conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty()
+                            }.getOrDefault("")
+                        } else {
+                            ""
+                        }
+                        Log.d(
+                            TAG,
+                            "DIAL POST $endpoint ($payload) -> HTTP $code | Location=${loc.ifBlank { "-" }} | err=${errBody.take(180).ifBlank { "-" }}"
+                        )
+                        Triple(code in 200..204, code, loc)
                     } finally {
                         connection?.disconnect()
                     }
                 }.getOrElse { e ->
-                    Log.d(TAG, "DIAL POST error on $endpoint: ${e.message}")
-                    false
+                    Log.d(TAG, "DIAL POST error on $endpoint ($payload): ${e.message}")
+                    Triple(false, -1, "")
                 }
-                if (launched) return true
+
+                val (accepted, code, locHeader) = postResult
+                if (accepted) {
+                    anyAccepted = true
+                    lastAcceptedDetail = "HTTP $code on $endpoint"
+                    val statusUrl = resolveDialStatusUrl(endpoint, locHeader)
+                    delay(600)
+                    if (isDialAppRunning(statusUrl)) {
+                        return DialLaunchOutcome(
+                            accepted = true,
+                            runningVerified = true,
+                            detail = "$lastAcceptedDetail (state=running at $statusUrl)"
+                        )
+                    }
+                }
             }
         }
-        return false
+
+        return DialLaunchOutcome(
+            accepted = anyAccepted,
+            runningVerified = false,
+            detail = lastAcceptedDetail.ifBlank { "No accepted DIAL POST" }
+        )
+    }
+
+    private fun resolveDialStatusUrl(postEndpoint: String, locationHeader: String): String {
+        if (locationHeader.isBlank()) return postEndpoint
+        return runCatching {
+            URL(URL(postEndpoint), locationHeader).toString()
+        }.getOrDefault(postEndpoint)
+    }
+
+    private fun isDialAppRunning(appUrl: String): Boolean {
+        return runCatching {
+            var connection: HttpURLConnection? = null
+            try {
+                val conn = (URL(appUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 2000
+                    readTimeout = 2000
+                    requestMethod = "GET"
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", USER_AGENT)
+                }
+                connection = conn
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    Log.d(TAG, "DIAL GET $appUrl -> HTTP $code")
+                    return false
+                }
+                val xml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
+                val state = extractTagValue(xml, "state")?.trim()?.lowercase(Locale.US).orEmpty()
+                val appName = extractTagValue(xml, "name")?.trim().orEmpty()
+                Log.d(TAG, "DIAL GET $appUrl -> HTTP $code | name=${appName.ifBlank { "-" }} | state=${state.ifBlank { "-" }}")
+                state == "running"
+            } finally {
+                connection?.disconnect()
+            }
+        }.getOrElse { e ->
+            Log.d(TAG, "DIAL GET status error on $appUrl: ${e.message}")
+            false
+        }
     }
 
     suspend fun playLocalMediaOnDevice(
