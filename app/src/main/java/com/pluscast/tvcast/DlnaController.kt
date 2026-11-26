@@ -691,6 +691,7 @@ class DlnaController(
         }
 
         sendStopAction(controlUrl, serviceUrn)
+        delay(400)
 
         return@withContext trySetUriAndPlay(
             controlUrl = controlUrl,
@@ -751,7 +752,7 @@ class DlnaController(
             return DlnaPlayResult(false, "SetURI fail: ${setUriRes.message}")
         }
 
-        delay(350)
+        delay(600)
         return sendPlayAction(controlUrl, serviceUrn)
     }
 
