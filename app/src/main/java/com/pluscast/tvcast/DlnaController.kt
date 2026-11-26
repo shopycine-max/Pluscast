@@ -325,7 +325,10 @@ class DlnaController(
             )
 
         val dialCandidates = resolveDialBaseUrls(device)
-        Log.d(TAG, "YouTube videoId=$videoId | device=${device.friendlyName} | DIAL candidates=$dialCandidates")
+        Log.d(
+            TAG,
+            "YouTube videoId=$videoId | device=${device.friendlyName} | DIAL candidates=$dialCandidates"
+        )
 
         var acceptedAnyRequest = false
         var runningVerifiedAny = false
@@ -344,11 +347,31 @@ class DlnaController(
             }
         }
 
+        if (runningVerifiedAny) {
+            Log.i(TAG, "DIAL YouTube confirmed running on ${device.friendlyName} ($lastDetail)")
+            return@withContext DlnaPlayResult(
+                true,
+                "${device.friendlyName} par YouTube open/play request bheji gayi ($videoId)"
+            )
+        }
+
+        if (acceptedAnyRequest) {
+            Log.w(
+                TAG,
+                "DIAL POST accepted on ${device.friendlyName} ($lastDetail), app state verify pending"
+            )
+            return@withContext DlnaPlayResult(
+                true,
+                "${device.friendlyName} par YouTube launch bheja gaya — TV par YouTube app check karein"
+            )
+        }
+
         val resolvedStreamUrl = streamResolver?.invoke(videoId)?.trim().orEmpty()
         if (
             resolvedStreamUrl.isNotEmpty() &&
             isValidHttpUrl(resolvedStreamUrl) &&
-            !isYouTubeWatchUrl(resolvedStreamUrl)
+            !isYouTubeWatchUrl(resolvedStreamUrl) &&
+            !isGoogleVideoUrl(resolvedStreamUrl)
         ) {
             val safeTitle = title.trim().ifEmpty { "YouTube ($videoId)" }
             val playRes = playMediaOnDevice(
@@ -361,35 +384,12 @@ class DlnaController(
                 Log.i(TAG, "DLNA AVTransport stream started on ${device.friendlyName} for videoId=$videoId")
                 return@withContext DlnaPlayResult(true, "${device.friendlyName} par DLNA stream bheja gaya")
             }
-            Log.w(TAG, "DLNA YouTube stream play failed: ${playRes.message}")
-            if (!runningVerifiedAny && !acceptedAnyRequest) {
-                return@withContext DlnaPlayResult(false, "TV stream play fail: ${playRes.message}")
-            }
         }
 
-        if (runningVerifiedAny) {
-            Log.i(TAG, "DIAL YouTube confirmed running on ${device.friendlyName} ($lastDetail)")
-            return@withContext DlnaPlayResult(
-                true,
-                "${device.friendlyName} par YouTube launch request bheji gayi aur app running mila — agar video screen par na chale to TV par YouTube app check karein"
-            )
-        }
-
-        if (acceptedAnyRequest) {
-            Log.w(
-                TAG,
-                "DIAL POST accepted on ${device.friendlyName} ($lastDetail), but app state 'running' verify nahi hua"
-            )
-            return@withContext DlnaPlayResult(
-                false,
-                "${device.friendlyName} ne request accept ki ($lastDetail), par YouTube running verify nahi hua — TV par YouTube app check karein"
-            )
-        }
-
-        Log.w(TAG, "DIAL launch failed and no direct stream URL resolved for videoId=$videoId on ${device.friendlyName}")
+        Log.w(TAG, "DIAL launch not accepted on ${device.friendlyName} for videoId=$videoId ($lastDetail)")
         return@withContext DlnaPlayResult(
             false,
-            "Is TV par YouTube launch ya stream resolve nahi ho paya — TV ka YouTube app ya Cast check karein"
+            "${device.friendlyName} par DIAL YouTube launch nahi hua — TV par YouTube app kholein ya Cast use karein"
         )
     }
 
@@ -398,6 +398,12 @@ class DlnaController(
         return lower.contains("youtube.com/watch") ||
             lower.contains("m.youtube.com/watch") ||
             lower.contains("youtu.be/")
+    }
+
+    private fun isGoogleVideoUrl(url: String): Boolean {
+        val lower = url.lowercase(Locale.US)
+        return lower.contains("googlevideo.com/") ||
+            lower.contains("manifest.googlevideo.com")
     }
 
     private fun resolveDialBaseUrls(device: DlnaDevice): List<String> {
@@ -416,14 +422,22 @@ class DlnaController(
             addDialBase(device.dialAppUrl)
         }
 
-        val host = runCatching { URL(device.controlUrl).host }.getOrNull().orEmpty()
+        val controlParsed = runCatching { URL(device.controlUrl) }.getOrNull()
+        val host = controlParsed?.host.orEmpty()
+        val controlPort = controlParsed?.port?.takeIf { it > 0 }
+
         if (host.isNotBlank()) {
-            val descUrls = listOf(
-                "http://$host:8008/ssdp/device-desc.xml",
-                "http://$host:8008/dd.xml",
-                "http://$host:8060/dial/dd.xml",
-                "http://$host:56789/dial/dd.xml"
-            )
+            val descUrls = buildList {
+                if (controlPort != null) {
+                    add("http://$host:$controlPort/dial/dd.xml")
+                    add("http://$host:$controlPort/ssdp/device-desc.xml")
+                }
+                add("http://$host:8008/ssdp/device-desc.xml")
+                add("http://$host:8008/dd.xml")
+                add("http://$host:8060/dial/dd.xml")
+                add("http://$host:56789/dial/dd.xml")
+            }.distinct()
+
             for (descUrl in descUrls) {
                 val dialFromDesc = probeDialApplicationUrl(descUrl)
                 if (!dialFromDesc.isNullOrBlank()) {
@@ -433,6 +447,7 @@ class DlnaController(
             addDialBase("http://$host:8008/apps")
             addDialBase("http://$host:8008/ws/apps")
             addDialBase("http://$host:8060/apps")
+            addDialBase("http://$host:56789/apps")
         }
 
         return urls.toList()
@@ -489,8 +504,8 @@ class DlnaController(
         }
 
         val payloads = listOf(
-            "{\"v\":\"$videoId\"}" to "application/json; charset=utf-8",
             "v=$videoId" to "text/plain; charset=utf-8",
+            "{\"v\":\"$videoId\"}" to "application/json; charset=utf-8",
             "v=$videoId&t=0" to "text/plain; charset=utf-8",
             "v=$videoId" to "application/x-www-form-urlencoded; charset=utf-8"
         )
@@ -546,7 +561,7 @@ class DlnaController(
                     val statusUrl = resolveDialStatusUrl(endpoint, locHeader)
 
                     repeat(3) { attempt ->
-                        delay(if (attempt == 0) 900L else 1000L)
+                        delay(if (attempt == 0) 800L else 900L)
                         if (isDialAppRunning(statusUrl)) {
                             return DialLaunchOutcome(
                                 accepted = true,
