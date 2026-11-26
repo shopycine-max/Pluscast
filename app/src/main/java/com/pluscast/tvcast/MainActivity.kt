@@ -58,9 +58,6 @@ import androidx.lifecycle.LifecycleCoroutineScope
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.gms.cast.MediaInfo
-import com.google.android.gms.cast.MediaLoadRequestData
-import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.framework.CastButtonFactory
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
@@ -750,7 +747,7 @@ class MainActivity : AppCompatActivity() {
         castYouTubeVideoToActiveTarget(
             videoId = videoId,
             title = "YouTube ($videoId)",
-            sourceUrl = "https://www.youtube.com/watch?v=$videoId"
+            sourceUrl = "https://m.youtube.com/watch?v=$videoId"
         )
     }
 
@@ -760,13 +757,15 @@ class MainActivity : AppCompatActivity() {
             return false
         }
         val lower = trimmed.lowercase(Locale.US)
-        if (lower.contains("youtube.com/") || lower.contains("youtu.be/")) {
+        if (
+            lower.contains("youtube.com/") ||
+            lower.contains("youtu.be/") ||
+            lower.contains("googlevideo.com/") ||
+            lower.contains("manifest.googlevideo.com")
+        ) {
             return false
         }
-        return lower.contains(".m3u8") ||
-            lower.contains(".mp4") ||
-            lower.contains("googlevideo.com/videoplayback") ||
-            lower.contains("manifest.googlevideo.com")
+        return lower.contains(".m3u8") || lower.contains(".mp4")
     }
 
     private fun castYouTubeVideoToActiveTarget(
@@ -774,9 +773,21 @@ class MainActivity : AppCompatActivity() {
         title: String,
         sourceUrl: String
     ) {
-        val capturedStream = latestVideoStreamUrl?.trim()?.takeIf { isPlayableDirectMediaUrl(it) }
+        val cleanVideoId = M3uPlaylistParser.extractYouTubeVideoId(videoId)
+            ?: M3uPlaylistParser.extractYouTubeVideoId(sourceUrl)
+            ?: videoId.trim()
 
-        saveLastWatched(url = sourceUrl, title = title)
+        if (cleanVideoId.isEmpty()) {
+            Toast.makeText(
+                this,
+                "Pehle koi YouTube video open karein",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        val canonicalWatchUrl = "https://m.youtube.com/watch?v=$cleanVideoId"
+        saveLastWatched(url = canonicalWatchUrl, title = title)
         updateLastWatchedPill()
 
         val activeCast = getActiveCastSession()
@@ -785,67 +796,37 @@ class MainActivity : AppCompatActivity() {
         if (activeCast == null && savedDevice == null) {
             Toast.makeText(
                 this,
-                "Pehle DLNA TV ya Cast device chunein",
+                "Pehle DLNA TV ya Cast device connect karein",
                 Toast.LENGTH_LONG
             ).show()
             return
         }
 
         lifecycleScope.launch {
-            var anySuccess = false
-            val messages = mutableListOf<String>()
-
-            if (activeCast != null && capturedStream != null) {
-                val castLoaded = runCatching {
-                    val mediaInfo = MediaInfo.Builder(capturedStream)
-                        .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
-                        .setContentType(
-                            if (capturedStream.contains(".m3u8", ignoreCase = true)) {
-                                "application/x-mpegURL"
-                            } else {
-                                "video/mp4"
-                            }
-                        )
-                        .setMetadata(
-                            MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
-                                putString(MediaMetadata.KEY_TITLE, title)
-                            }
-                        )
-                        .build()
-                    val req = MediaLoadRequestData.Builder()
-                        .setMediaInfo(mediaInfo)
-                        .setAutoplay(true)
-                        .build()
-                    activeCast.remoteMediaClient?.load(req)
-                    true
-                }.getOrElse { false }
-                if (castLoaded) {
-                    anySuccess = true
-                    messages.add("${activeCast.castDevice?.friendlyName ?: "Cast TV"} par stream bheja gaya")
-                }
-            }
+            val statusList = mutableListOf<String>()
 
             if (savedDevice != null) {
                 val dlnaRes = dlnaController.playYouTubeOnDevice(
                     device = savedDevice,
-                    youtubeUrlOrId = videoId,
+                    youtubeUrlOrId = cleanVideoId,
                     title = title
                 )
-                if (dlnaRes.success) {
-                    anySuccess = true
-                }
-                messages.add(dlnaRes.message)
-            } else if (activeCast != null && capturedStream == null) {
-                messages.add("Cast TV par YouTube ke liye TV ka YouTube app ya DIAL/Cast device use karein")
+                statusList.add(dlnaRes.message)
+            }
+
+            if (activeCast != null && savedDevice == null) {
+                val castName = activeCast.castDevice?.friendlyName?.trim().orEmpty()
+                    .ifEmpty { "Cast TV" }
+                statusList.add("$castName connected — TV par YouTube app ya Cast menu se video play karein")
             }
 
             if (!isFinishing && !isDestroyed) {
-                val finalMsg = messages.distinct().joinToString(" • ").ifBlank {
-                    "YouTube cast bhej nahi paye"
+                val finalText = statusList.distinct().joinToString(" • ").ifBlank {
+                    "YouTube cast request bheji nahi ja saki"
                 }
                 Toast.makeText(
                     this@MainActivity,
-                    finalMsg,
+                    finalText,
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -1091,6 +1072,7 @@ class MainActivity : AppCompatActivity() {
         btnClose.setOnClickListener {
             latestVideoStreamUrl = null
             runCatching {
+                webView.evaluateJavascript("document.querySelectorAll('video').forEach(v => v.pause());", null)
                 webView.stopLoading()
                 webView.destroy()
             }
@@ -1111,6 +1093,10 @@ class MainActivity : AppCompatActivity() {
                     Toast.LENGTH_LONG
                 ).show()
                 return@setOnClickListener
+            }
+
+            runCatching {
+                webView.evaluateJavascript("document.querySelectorAll('video').forEach(v => v.pause());", null)
             }
 
             castYouTubeVideoToActiveTarget(
