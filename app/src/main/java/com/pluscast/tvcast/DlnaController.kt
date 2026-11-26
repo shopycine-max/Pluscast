@@ -112,6 +112,14 @@ class DlnaController(
         private const val USER_AGENT = "PlusCast/1.0 (UPnP/1.0; Android)"
         private const val SSDP_GROUP = "239.255.255.250"
         private const val SSDP_PORT = 1900
+        private val YOUTUBE_DIAL_APP_NAMES = listOf(
+            "YouTube",
+            "youtube",
+            "YouTubeTV",
+            "youtubetv",
+            "YouTubeCast",
+            "youtubecast"
+        )
     }
 
     private var localMediaServer: LocalMediaHttpServer? = null
@@ -429,6 +437,7 @@ class DlnaController(
         if (host.isNotBlank()) {
             val descUrls = buildList {
                 if (controlPort != null) {
+                    add("http://$host:$controlPort/")
                     add("http://$host:$controlPort/dial/dd.xml")
                     add("http://$host:$controlPort/ssdp/device-desc.xml")
                 }
@@ -443,6 +452,9 @@ class DlnaController(
                 if (!dialFromDesc.isNullOrBlank()) {
                     addDialBase(dialFromDesc)
                 }
+            }
+            if (controlPort != null) {
+                addDialBase("http://$host:$controlPort/apps")
             }
             addDialBase("http://$host:8008/apps")
             addDialBase("http://$host:8008/ws/apps")
@@ -494,13 +506,12 @@ class DlnaController(
 
     private suspend fun tryLaunchYouTubeViaDial(dialBaseUrl: String, videoId: String): DialLaunchOutcome {
         val cleanBase = dialBaseUrl.trim().trimEnd('/')
-        val appEndpoints = linkedSetOf(
-            "$cleanBase/YouTube",
-            "$cleanBase/youtube"
-        )
-        if (!cleanBase.endsWith("/apps", ignoreCase = true) && !cleanBase.endsWith("/ws/apps", ignoreCase = true)) {
-            appEndpoints.add("$cleanBase/apps/YouTube")
-            appEndpoints.add("$cleanBase/apps/youtube")
+        val appEndpoints = linkedSetOf<String>()
+        for (appName in YOUTUBE_DIAL_APP_NAMES) {
+            appEndpoints.add("$cleanBase/$appName")
+            if (!cleanBase.endsWith("/apps", ignoreCase = true) && !cleanBase.endsWith("/ws/apps", ignoreCase = true)) {
+                appEndpoints.add("$cleanBase/apps/$appName")
+            }
         }
 
         val payloads = listOf(
