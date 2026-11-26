@@ -58,6 +58,9 @@ import androidx.lifecycle.LifecycleCoroutineScope
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.gms.cast.MediaInfo
+import com.google.android.gms.cast.MediaLoadRequestData
+import com.google.android.gms.cast.MediaMetadata
 import com.google.android.gms.cast.framework.CastButtonFactory
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
@@ -126,9 +129,7 @@ class MainActivity : AppCompatActivity() {
     private val dlnaController by lazy {
         DlnaController(
             context = this,
-            streamResolver = { _ ->
-                latestVideoStreamUrl?.takeIf { isPlayableDirectMediaUrl(it) }
-            }
+            streamResolver = { _ -> latestVideoStreamUrl }
         )
     }
     private var localMediaServer: LocalMediaServer? = null
@@ -747,23 +748,8 @@ class MainActivity : AppCompatActivity() {
         castYouTubeVideoToActiveTarget(
             videoId = videoId,
             title = "YouTube ($videoId)",
-            sourceUrl = "https://m.youtube.com/watch?v=$videoId"
+            sourceUrl = "https://www.youtube.com/watch?v=$videoId"
         )
-    }
-
-    private fun isPlayableDirectMediaUrl(url: String): Boolean {
-        val trimmed = url.trim()
-        if (!trimmed.startsWith("http://", true) && !trimmed.startsWith("https://", true)) {
-            return false
-        }
-        val lower = trimmed.lowercase(Locale.US)
-        if (lower.contains("youtube.com/") || lower.contains("youtu.be/")) {
-            return false
-        }
-        return lower.contains(".m3u8") ||
-            lower.contains(".mp4") ||
-            lower.contains("googlevideo.com/") ||
-            lower.contains("manifest.googlevideo.com")
     }
 
     private fun castYouTubeVideoToActiveTarget(
@@ -771,21 +757,11 @@ class MainActivity : AppCompatActivity() {
         title: String,
         sourceUrl: String
     ) {
-        val cleanVideoId = M3uPlaylistParser.extractYouTubeVideoId(videoId)
-            ?: M3uPlaylistParser.extractYouTubeVideoId(sourceUrl)
-            ?: videoId.trim()
+        val ytWatchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val capturedStream = latestVideoStreamUrl?.trim().orEmpty()
+        val castTargetUrl = if (capturedStream.isNotEmpty()) capturedStream else ytWatchUrl
 
-        if (cleanVideoId.isEmpty()) {
-            Toast.makeText(
-                this,
-                "Pehle koi YouTube video open karein",
-                Toast.LENGTH_SHORT
-            ).show()
-            return
-        }
-
-        val canonicalWatchUrl = "https://m.youtube.com/watch?v=$cleanVideoId"
-        saveLastWatched(url = canonicalWatchUrl, title = title)
+        saveLastWatched(url = sourceUrl, title = title)
         updateLastWatchedPill()
 
         val activeCast = getActiveCastSession()
@@ -794,37 +770,66 @@ class MainActivity : AppCompatActivity() {
         if (activeCast == null && savedDevice == null) {
             Toast.makeText(
                 this,
-                "Pehle DLNA TV ya Cast device connect karein",
+                "Pehle DLNA TV ya Cast device chunein",
                 Toast.LENGTH_LONG
             ).show()
             return
         }
 
+        Toast.makeText(this, "TV par cast bhej rahe hain...", Toast.LENGTH_SHORT).show()
+
         lifecycleScope.launch {
-            val statusList = mutableListOf<String>()
+            var anySuccess = false
+            var lastMsg = ""
+
+            if (activeCast != null) {
+                val castLoaded = runCatching {
+                    val mediaInfo = MediaInfo.Builder(castTargetUrl)
+                        .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+                        .setContentType(
+                            if (castTargetUrl.contains(".m3u8", ignoreCase = true)) {
+                                "application/x-mpegURL"
+                            } else {
+                                "video/mp4"
+                            }
+                        )
+                        .setMetadata(
+                            MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
+                                putString(MediaMetadata.KEY_TITLE, title)
+                            }
+                        )
+                        .build()
+                    val req = MediaLoadRequestData.Builder()
+                        .setMediaInfo(mediaInfo)
+                        .setAutoplay(true)
+                        .build()
+                    activeCast.remoteMediaClient?.load(req)
+                    true
+                }.getOrElse { false }
+                if (castLoaded) {
+                    anySuccess = true
+                    lastMsg = "${activeCast.castDevice?.friendlyName ?: "Cast TV"} par bhej diya"
+                }
+            }
 
             if (savedDevice != null) {
                 val dlnaRes = dlnaController.playYouTubeOnDevice(
                     device = savedDevice,
-                    youtubeUrlOrId = cleanVideoId,
+                    youtubeUrlOrId = videoId,
                     title = title
                 )
-                statusList.add(dlnaRes.message)
-            }
-
-            if (activeCast != null && savedDevice == null) {
-                val castName = activeCast.castDevice?.friendlyName?.trim().orEmpty()
-                    .ifEmpty { "Cast TV" }
-                statusList.add("$castName connected — TV par YouTube app ya Cast menu se video play karein")
+                if (dlnaRes.success) {
+                    anySuccess = true
+                    lastMsg = dlnaRes.message
+                } else if (!anySuccess) {
+                    lastMsg = dlnaRes.message
+                }
             }
 
             if (!isFinishing && !isDestroyed) {
-                val finalText = statusList.distinct().joinToString(" • ").ifBlank {
-                    "YouTube cast request bheji nahi ja saki"
-                }
                 Toast.makeText(
                     this@MainActivity,
-                    finalText,
+                    lastMsg.ifBlank { "Cast bhej nahi paye" },
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -1070,7 +1075,6 @@ class MainActivity : AppCompatActivity() {
         btnClose.setOnClickListener {
             latestVideoStreamUrl = null
             runCatching {
-                webView.evaluateJavascript("document.querySelectorAll('video').forEach(v => v.pause());", null)
                 webView.stopLoading()
                 webView.destroy()
             }
@@ -1154,7 +1158,6 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("TV par Cast Karein") { _, _ ->
                     lifecycleScope.launch {
                         var castStarted = false
-                        var statusMsg = ""
 
                         if (hasCastSession) {
                             val relayUrl = startLocalRelayForUri(uri, mimeType, displayName)
@@ -1168,7 +1171,6 @@ class MainActivity : AppCompatActivity() {
                             if (castReq != null) {
                                 CastOptionsProvider.loadMediaOnActiveCastSession(this@MainActivity, castReq)
                                 castStarted = true
-                                statusMsg = "$displayName → ${getActiveCastSession()?.castDevice?.friendlyName ?: "Cast TV"}"
                             }
                         }
 
@@ -1181,9 +1183,6 @@ class MainActivity : AppCompatActivity() {
                             )
                             if (dlnaRes.success) {
                                 castStarted = true
-                                statusMsg = "$displayName → ${savedDevice.friendlyName}"
-                            } else if (!castStarted) {
-                                statusMsg = dlnaRes.message
                             }
                         }
 
@@ -1191,13 +1190,13 @@ class MainActivity : AppCompatActivity() {
                         if (castStarted) {
                             Toast.makeText(
                                 this@MainActivity,
-                                statusMsg.ifBlank { "$displayName → $targetLabel" },
+                                "$displayName → $targetLabel",
                                 Toast.LENGTH_SHORT
                             ).show()
                         } else {
                             Toast.makeText(
                                 this@MainActivity,
-                                statusMsg.ifBlank { "Cast bhej nahi paya, player khol rahe hain" },
+                                "Cast bhej nahi paya, player khol rahe hain",
                                 Toast.LENGTH_SHORT
                             ).show()
                             launchPlayer(
