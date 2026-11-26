@@ -1095,10 +1095,6 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            runCatching {
-                webView.evaluateJavascript("document.querySelectorAll('video').forEach(v => v.pause());", null)
-            }
-
             castYouTubeVideoToActiveTarget(
                 videoId = videoId,
                 title = currentTitle,
