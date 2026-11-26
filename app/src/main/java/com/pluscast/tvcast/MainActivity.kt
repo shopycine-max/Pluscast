@@ -129,7 +129,9 @@ class MainActivity : AppCompatActivity() {
     private val dlnaController by lazy {
         DlnaController(
             context = this,
-            streamResolver = { _ -> latestVideoStreamUrl }
+            streamResolver = { _ ->
+                latestVideoStreamUrl?.takeIf { isPlayableDirectMediaUrl(it) }
+            }
         )
     }
     private var localMediaServer: LocalMediaServer? = null
@@ -752,14 +754,27 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun isPlayableDirectMediaUrl(url: String): Boolean {
+        val trimmed = url.trim()
+        if (!trimmed.startsWith("http://", true) && !trimmed.startsWith("https://", true)) {
+            return false
+        }
+        val lower = trimmed.lowercase(Locale.US)
+        if (lower.contains("youtube.com/") || lower.contains("youtu.be/")) {
+            return false
+        }
+        return lower.contains(".m3u8") ||
+            lower.contains(".mp4") ||
+            lower.contains("googlevideo.com/videoplayback") ||
+            lower.contains("manifest.googlevideo.com")
+    }
+
     private fun castYouTubeVideoToActiveTarget(
         videoId: String,
         title: String,
         sourceUrl: String
     ) {
-        val ytWatchUrl = "https://www.youtube.com/watch?v=$videoId"
-        val capturedStream = latestVideoStreamUrl?.trim().orEmpty()
-        val castTargetUrl = if (capturedStream.isNotEmpty()) capturedStream else ytWatchUrl
+        val capturedStream = latestVideoStreamUrl?.trim()?.takeIf { isPlayableDirectMediaUrl(it) }
 
         saveLastWatched(url = sourceUrl, title = title)
         updateLastWatchedPill()
@@ -776,18 +791,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        Toast.makeText(this, "TV par cast bhej rahe hain...", Toast.LENGTH_SHORT).show()
-
         lifecycleScope.launch {
             var anySuccess = false
-            var lastMsg = ""
+            val messages = mutableListOf<String>()
 
-            if (activeCast != null) {
+            if (activeCast != null && capturedStream != null) {
                 val castLoaded = runCatching {
-                    val mediaInfo = MediaInfo.Builder(castTargetUrl)
+                    val mediaInfo = MediaInfo.Builder(capturedStream)
                         .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
                         .setContentType(
-                            if (castTargetUrl.contains(".m3u8", ignoreCase = true)) {
+                            if (capturedStream.contains(".m3u8", ignoreCase = true)) {
                                 "application/x-mpegURL"
                             } else {
                                 "video/mp4"
@@ -808,7 +821,7 @@ class MainActivity : AppCompatActivity() {
                 }.getOrElse { false }
                 if (castLoaded) {
                     anySuccess = true
-                    lastMsg = "${activeCast.castDevice?.friendlyName ?: "Cast TV"} par bhej diya"
+                    messages.add("${activeCast.castDevice?.friendlyName ?: "Cast TV"} par stream bheja gaya")
                 }
             }
 
@@ -820,20 +833,19 @@ class MainActivity : AppCompatActivity() {
                 )
                 if (dlnaRes.success) {
                     anySuccess = true
-                    lastMsg = dlnaRes.message
-                } else {
-                    lastMsg = if (anySuccess) {
-                        "$lastMsg | DLNA: ${dlnaRes.message}"
-                    } else {
-                        dlnaRes.message
-                    }
                 }
+                messages.add(dlnaRes.message)
+            } else if (activeCast != null && capturedStream == null) {
+                messages.add("Cast TV par YouTube ke liye TV ka YouTube app ya DIAL/Cast device use karein")
             }
 
             if (!isFinishing && !isDestroyed) {
+                val finalMsg = messages.distinct().joinToString(" • ").ifBlank {
+                    "YouTube cast bhej nahi paye"
+                }
                 Toast.makeText(
                     this@MainActivity,
-                    lastMsg.ifBlank { "Cast bhej nahi paye" },
+                    finalMsg,
                     Toast.LENGTH_LONG
                 ).show()
             }
