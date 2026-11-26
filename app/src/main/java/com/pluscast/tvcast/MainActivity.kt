@@ -821,8 +821,12 @@ class MainActivity : AppCompatActivity() {
                 if (dlnaRes.success) {
                     anySuccess = true
                     lastMsg = dlnaRes.message
-                } else if (!anySuccess) {
-                    lastMsg = dlnaRes.message
+                } else {
+                    lastMsg = if (anySuccess) {
+                        "$lastMsg | DLNA: ${dlnaRes.message}"
+                    } else {
+                        dlnaRes.message
+                    }
                 }
             }
 
@@ -1158,6 +1162,7 @@ class MainActivity : AppCompatActivity() {
                 .setPositiveButton("TV par Cast Karein") { _, _ ->
                     lifecycleScope.launch {
                         var castStarted = false
+                        var statusMsg = ""
 
                         if (hasCastSession) {
                             val relayUrl = startLocalRelayForUri(uri, mimeType, displayName)
@@ -1171,6 +1176,7 @@ class MainActivity : AppCompatActivity() {
                             if (castReq != null) {
                                 CastOptionsProvider.loadMediaOnActiveCastSession(this@MainActivity, castReq)
                                 castStarted = true
+                                statusMsg = "$displayName → ${getActiveCastSession()?.castDevice?.friendlyName ?: "Cast TV"}"
                             }
                         }
 
@@ -1183,6 +1189,9 @@ class MainActivity : AppCompatActivity() {
                             )
                             if (dlnaRes.success) {
                                 castStarted = true
+                                statusMsg = "$displayName → ${savedDevice.friendlyName}"
+                            } else if (!castStarted) {
+                                statusMsg = dlnaRes.message
                             }
                         }
 
@@ -1190,13 +1199,13 @@ class MainActivity : AppCompatActivity() {
                         if (castStarted) {
                             Toast.makeText(
                                 this@MainActivity,
-                                "$displayName → $targetLabel",
+                                statusMsg.ifBlank { "$displayName → $targetLabel" },
                                 Toast.LENGTH_SHORT
                             ).show()
                         } else {
                             Toast.makeText(
                                 this@MainActivity,
-                                "Cast bhej nahi paya, player khol rahe hain",
+                                statusMsg.ifBlank { "Cast bhej nahi paya, player khol rahe hain" },
                                 Toast.LENGTH_SHORT
                             ).show()
                             launchPlayer(
