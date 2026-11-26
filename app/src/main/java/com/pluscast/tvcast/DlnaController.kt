@@ -328,6 +328,7 @@ class DlnaController(
         Log.d(TAG, "YouTube videoId=$videoId | device=${device.friendlyName} | DIAL candidates=$dialCandidates")
 
         var acceptedAnyRequest = false
+        var runningVerifiedAny = false
         var lastDetail = "No DIAL response"
 
         for (dialBase in dialCandidates) {
@@ -337,11 +338,9 @@ class DlnaController(
                 lastDetail = outcome.detail
             }
             if (outcome.runningVerified) {
-                Log.i(TAG, "DIAL YouTube confirmed running on ${device.friendlyName} (${outcome.detail})")
-                return@withContext DlnaPlayResult(
-                    true,
-                    "${device.friendlyName} par YouTube launch request bheji gayi aur app running mila — agar video screen par na chale to TV par YouTube app check karein"
-                )
+                runningVerifiedAny = true
+                lastDetail = outcome.detail
+                break
             }
         }
 
@@ -363,7 +362,17 @@ class DlnaController(
                 return@withContext DlnaPlayResult(true, "${device.friendlyName} par DLNA stream bheja gaya")
             }
             Log.w(TAG, "DLNA YouTube stream play failed: ${playRes.message}")
-            return@withContext DlnaPlayResult(false, "TV stream play fail: ${playRes.message}")
+            if (!runningVerifiedAny && !acceptedAnyRequest) {
+                return@withContext DlnaPlayResult(false, "TV stream play fail: ${playRes.message}")
+            }
+        }
+
+        if (runningVerifiedAny) {
+            Log.i(TAG, "DIAL YouTube confirmed running on ${device.friendlyName} ($lastDetail)")
+            return@withContext DlnaPlayResult(
+                true,
+                "${device.friendlyName} par YouTube launch request bheji gayi aur app running mila — agar video screen par na chale to TV par YouTube app check karein"
+            )
         }
 
         if (acceptedAnyRequest) {
