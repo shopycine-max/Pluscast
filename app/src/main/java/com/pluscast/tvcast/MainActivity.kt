@@ -757,15 +757,13 @@ class MainActivity : AppCompatActivity() {
             return false
         }
         val lower = trimmed.lowercase(Locale.US)
-        if (
-            lower.contains("youtube.com/") ||
-            lower.contains("youtu.be/") ||
-            lower.contains("googlevideo.com/") ||
-            lower.contains("manifest.googlevideo.com")
-        ) {
+        if (lower.contains("youtube.com/") || lower.contains("youtu.be/")) {
             return false
         }
-        return lower.contains(".m3u8") || lower.contains(".mp4")
+        return lower.contains(".m3u8") ||
+            lower.contains(".mp4") ||
+            lower.contains("googlevideo.com/") ||
+            lower.contains("manifest.googlevideo.com")
     }
 
     private fun castYouTubeVideoToActiveTarget(
