@@ -363,6 +363,28 @@ class DlnaController(
             )
         }
 
+        val resolvedStreamUrl = streamResolver?.invoke(videoId)?.trim().orEmpty()
+        if (
+            resolvedStreamUrl.isNotEmpty() &&
+            isValidHttpUrl(resolvedStreamUrl) &&
+            !isYouTubeWatchUrl(resolvedStreamUrl)
+        ) {
+            val safeTitle = title.trim().ifEmpty { "YouTube ($videoId)" }
+            val playRes = playMediaOnDevice(
+                device = device,
+                mediaUrl = resolvedStreamUrl,
+                title = safeTitle,
+                mimeType = resolveMimeType(resolvedStreamUrl, "video/mp4")
+            )
+            if (playRes.success) {
+                Log.i(TAG, "DLNA AVTransport stream started on ${device.friendlyName} for videoId=$videoId")
+                return@withContext DlnaPlayResult(
+                    true,
+                    "${device.friendlyName} par YouTube stream play ho raha hai"
+                )
+            }
+        }
+
         if (acceptedAnyRequest) {
             Log.w(
                 TAG,
@@ -374,30 +396,13 @@ class DlnaController(
             )
         }
 
-        val resolvedStreamUrl = streamResolver?.invoke(videoId)?.trim().orEmpty()
-        if (
-            resolvedStreamUrl.isNotEmpty() &&
-            isValidHttpUrl(resolvedStreamUrl) &&
-            !isYouTubeWatchUrl(resolvedStreamUrl) &&
-            !isGoogleVideoUrl(resolvedStreamUrl)
-        ) {
-            val safeTitle = title.trim().ifEmpty { "YouTube ($videoId)" }
-            val playRes = playMediaOnDevice(
-                device = device,
-                mediaUrl = resolvedStreamUrl,
-                title = safeTitle,
-                mimeType = resolveMimeType(resolvedStreamUrl, "video/mp4")
-            )
-            if (playRes.success) {
-                Log.i(TAG, "DLNA AVTransport stream started on ${device.friendlyName} for videoId=$videoId")
-                return@withContext DlnaPlayResult(true, "${device.friendlyName} par DLNA stream bheja gaya")
-            }
-        }
-
-        Log.w(TAG, "DIAL launch not accepted on ${device.friendlyName} for videoId=$videoId ($lastDetail)")
+        Log.w(
+            TAG,
+            "DIAL and DLNA stream fallback failed on ${device.friendlyName} for videoId=$videoId ($lastDetail)"
+        )
         return@withContext DlnaPlayResult(
             false,
-            "${device.friendlyName} par DIAL YouTube launch nahi hua — TV par YouTube app kholein ya Cast use karein"
+            "${device.friendlyName} par YouTube play nahi ho saka — TV par YouTube app kholein ya Cast check karein"
         )
     }
 
@@ -406,12 +411,6 @@ class DlnaController(
         return lower.contains("youtube.com/watch") ||
             lower.contains("m.youtube.com/watch") ||
             lower.contains("youtu.be/")
-    }
-
-    private fun isGoogleVideoUrl(url: String): Boolean {
-        val lower = url.lowercase(Locale.US)
-        return lower.contains("googlevideo.com/") ||
-            lower.contains("manifest.googlevideo.com")
     }
 
     private fun resolveDialBaseUrls(device: DlnaDevice): List<String> {
