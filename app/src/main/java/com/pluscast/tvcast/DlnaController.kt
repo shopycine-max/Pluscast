@@ -363,6 +363,26 @@ class DlnaController(
         )
     }
 
+    fun openYouTubeOnPhone(youtubeUrlOrId: String): Boolean {
+        val appContext = context?.applicationContext ?: return false
+        val videoId = extractYouTubeVideoId(youtubeUrlOrId)
+        val targetUrl = if (videoId != null) {
+            "https://www.youtube.com/watch?v=$videoId"
+        } else {
+            youtubeUrlOrId.trim().takeIf { isValidHttpUrl(it) } ?: return false
+        }
+
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            appContext.startActivity(intent)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun openSystemCastSettings(): Boolean {
         val appContext = context?.applicationContext ?: return false
         return try {
@@ -1245,3 +1265,4 @@ class DlnaController(
         }
     }
 }
+
