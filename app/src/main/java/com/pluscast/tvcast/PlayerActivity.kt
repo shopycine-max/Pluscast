@@ -85,6 +85,7 @@ class PlayerActivity : AppCompatActivity() {
         private const val ICON_CAST_SOFT = "#7DD3FC"
         private const val TEXT_PRIMARY = "#F8FAFC"
         private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
+        private val YT_ID_REGEX = Regex("^[a-zA-Z0-9_-]{11}$")
     }
 
     private val dlnaController by lazy { DlnaController(this) }
@@ -225,7 +226,7 @@ class PlayerActivity : AppCompatActivity() {
             val videoId = youtubeVideoId.ifEmpty { extractYouTubeId(candidateForYt).orEmpty() }
             val watchUrl = when {
                 videoId.isNotEmpty() -> "https://m.youtube.com/watch?v=$videoId"
-                youtubeUrl.startsWith("http://", true) || youtubeUrl.startsWith("https://", true) -> youtubeUrl
+                isValidHttpUrl(youtubeUrl) -> youtubeUrl
                 else -> ""
             }
             if (watchUrl.isEmpty()) {
@@ -248,12 +249,26 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun extractYouTubeId(raw: String): String? {
         val trimmed = raw.trim()
-        if (trimmed.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return trimmed
-        M3uPlaylistParser.extractYouTubeVideoId(trimmed)?.let { return it }
+        if (trimmed.matches(YT_ID_REGEX)) return trimmed
         val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
-        uri.getQueryParameter("v")?.trim()?.takeIf { it.matches(Regex("^[a-zA-Z0-9_-]{11}$")) }?.let { return it }
-        val last = uri.lastPathSegment?.trim().orEmpty()
-        return if (last.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) last else null
+        val host = uri.host?.lowercase(Locale.US).orEmpty()
+
+        if (host.contains("youtu.be")) {
+            val seg = uri.lastPathSegment?.trim().orEmpty()
+            if (seg.matches(YT_ID_REGEX)) return seg
+        }
+
+        uri.getQueryParameter("v")?.trim()?.takeIf { it.matches(YT_ID_REGEX) }?.let { return it }
+
+        val segments = uri.pathSegments.orEmpty()
+        for (i in 0 until segments.size - 1) {
+            val tag = segments[i].lowercase(Locale.US)
+            if (tag == "shorts" || tag == "embed" || tag == "live" || tag == "v") {
+                val candidate = segments[i + 1].trim()
+                if (candidate.matches(YT_ID_REGEX)) return candidate
+            }
+        }
+        return null
     }
 
     @SuppressLint("SetJavaScriptEnabled")
