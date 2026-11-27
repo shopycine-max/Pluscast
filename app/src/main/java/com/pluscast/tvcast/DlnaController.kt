@@ -1,9 +1,11 @@
 package com.pluscast.tvcast
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -32,14 +34,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 data class DlnaDevice(
     val friendlyName: String,
-    val controlUrl: String,
+    val controlUrl: String = "",
     val serviceType: String = "urn:schemas-upnp-org:service:AVTransport:1",
-    val dialAppUrl: String = ""
-)
+    val dialAppUrl: String = "",
+    val hostIp: String = ""
+) {
+    val supportsDlna: Boolean get() = controlUrl.isNotBlank()
+    val supportsDial: Boolean get() = dialAppUrl.isNotBlank() || hostIp.isNotBlank()
+}
 
 data class DlnaPlayResult(
     val success: Boolean,
-    val message: String
+    val message: String,
+    val suggestSystemCast: Boolean = false
 )
 
 object DlnaDeviceStore {
@@ -49,11 +56,13 @@ object DlnaDeviceStore {
     private const val KEY_CONTROL_URL = "last_control_url"
     private const val KEY_SERVICE_TYPE = "last_service_type"
     private const val KEY_DIAL_APP_URL = "last_dial_app_url"
+    private const val KEY_HOST_IP = "last_host_ip"
 
     fun saveLastDevice(context: Context, device: DlnaDevice) {
         val safeName = device.friendlyName.trim()
         val safeControlUrl = device.controlUrl.trim()
-        if (safeName.isEmpty() || !isValidHttpUrl(safeControlUrl)) return
+        val safeDialUrl = device.dialAppUrl.trim()
+        if (safeName.isEmpty() || (!isValidHttpUrl(safeControlUrl) && !isValidHttpUrl(safeDialUrl))) return
 
         context.applicationContext
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -64,7 +73,8 @@ object DlnaDeviceStore {
                 KEY_SERVICE_TYPE,
                 device.serviceType.trim().ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
             )
-            .putString(KEY_DIAL_APP_URL, device.dialAppUrl.trim())
+            .putString(KEY_DIAL_APP_URL, safeDialUrl)
+            .putString(KEY_HOST_IP, device.hostIp.trim())
             .apply()
     }
 
@@ -73,18 +83,21 @@ object DlnaDeviceStore {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val name = prefs.getString(KEY_NAME, null)?.trim().orEmpty()
         val controlUrl = prefs.getString(KEY_CONTROL_URL, null)?.trim().orEmpty()
-        if (name.isEmpty() || !isValidHttpUrl(controlUrl)) return null
+        val dialAppUrl = prefs.getString(KEY_DIAL_APP_URL, null)?.trim().orEmpty()
+        val hostIp = prefs.getString(KEY_HOST_IP, null)?.trim().orEmpty()
+
+        if (name.isEmpty() || (!isValidHttpUrl(controlUrl) && !isValidHttpUrl(dialAppUrl))) return null
 
         val serviceType = prefs.getString(KEY_SERVICE_TYPE, null)?.trim()
             .takeUnless { it.isNullOrEmpty() }
             ?: "urn:schemas-upnp-org:service:AVTransport:1"
-        val dialAppUrl = prefs.getString(KEY_DIAL_APP_URL, null)?.trim().orEmpty()
 
         return DlnaDevice(
             friendlyName = name,
             controlUrl = controlUrl,
             serviceType = serviceType,
-            dialAppUrl = dialAppUrl
+            dialAppUrl = dialAppUrl,
+            hostIp = hostIp
         )
     }
 
@@ -103,8 +116,7 @@ object DlnaDeviceStore {
 }
 
 class DlnaController(
-    private val context: Context? = null,
-    private val streamResolver: (suspend (videoId: String) -> String?)? = null
+    private val context: Context? = null
 ) {
 
     companion object {
@@ -118,7 +130,7 @@ class DlnaController(
 
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
-            val found = linkedMapOf<String, DlnaDevice>()
+            val foundByHost = linkedMapOf<String, DlnaDevice>()
             val locations = linkedMapOf<String, String>()
 
             val appContext = context?.applicationContext
@@ -142,10 +154,11 @@ class DlnaController(
             }
 
             val searchTargets = listOf(
+                "urn:dial-multiscreen-org:service:dial:1",
+                "urn:dial-multiscreen-org:device:dial:1",
                 "urn:schemas-upnp-org:device:MediaRenderer:1",
                 "urn:schemas-upnp-org:service:AVTransport:1",
                 "urn:schemas-upnp-org:service:AVTransport:2",
-                "urn:dial-multiscreen-org:service:dial:1",
                 "upnp:rootdevice"
             )
 
@@ -160,12 +173,12 @@ class DlnaController(
                 } else {
                     DatagramSocket()
                 }.apply {
-                    soTimeout = 500
+                    soTimeout = 450
                 }
 
                 multicastSocket = MulticastSocket(SSDP_PORT).apply {
                     reuseAddress = true
-                    soTimeout = 500
+                    soTimeout = 450
                     try {
                         if (networkInterface != null) {
                             setNetworkInterface(networkInterface)
@@ -186,31 +199,35 @@ class DlnaController(
                     }
                 }
 
-                for (st in searchTargets) {
-                    val query = buildString {
-                        append("M-SEARCH * HTTP/1.1\r\n")
-                        append("HOST: $SSDP_GROUP:$SSDP_PORT\r\n")
-                        append("MAN: \"ssdp:discover\"\r\n")
-                        append("MX: 3\r\n")
-                        append("ST: $st\r\n\r\n")
-                    }.toByteArray(Charsets.UTF_8)
+                // Send M-SEARCH twice for better UDP reliability on Wi-Fi routers
+                repeat(2) {
+                    for (st in searchTargets) {
+                        val query = buildString {
+                            append("M-SEARCH * HTTP/1.1\r\n")
+                            append("HOST: $SSDP_GROUP:$SSDP_PORT\r\n")
+                            append("MAN: \"ssdp:discover\"\r\n")
+                            append("MX: 2\r\n")
+                            append("ST: $st\r\n\r\n")
+                        }.toByteArray(Charsets.UTF_8)
 
-                    val packet = DatagramPacket(query, query.size, group, SSDP_PORT)
-                    try {
-                        if (joinedMulticast) {
-                            multicastSocket.send(packet)
-                        } else {
-                            unicastSocket.send(packet)
-                        }
-                    } catch (_: Exception) {
+                        val packet = DatagramPacket(query, query.size, group, SSDP_PORT)
                         try {
-                            unicastSocket.send(packet)
+                            if (joinedMulticast) {
+                                multicastSocket.send(packet)
+                            } else {
+                                unicastSocket.send(packet)
+                            }
                         } catch (_: Exception) {
+                            try {
+                                unicastSocket.send(packet)
+                            } catch (_: Exception) {
+                            }
                         }
                     }
+                    delay(120)
                 }
 
-                val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(1000, 15000)
+                val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(1500, 15000)
                 val buffer = ByteArray(4096)
 
                 while (System.currentTimeMillis() < deadline) {
@@ -260,14 +277,25 @@ class DlnaController(
                 }
             }
 
+            // Merge DLNA AVTransport and DIAL descriptions per TV IP so both work together
             for ((loc, hintDial) in locations) {
                 val parsed = parseDeviceDescription(loc, hintDial) ?: continue
-                if (parsed.controlUrl.isNotBlank() && isValidHttpUrl(parsed.controlUrl)) {
-                    found["${parsed.friendlyName.lowercase(Locale.US)}|${parsed.controlUrl}"] = parsed
+                val key = parsed.hostIp.ifBlank { parsed.friendlyName.lowercase(Locale.US) }
+                val existing = foundByHost[key]
+                if (existing == null) {
+                    foundByHost[key] = parsed
+                } else {
+                    foundByHost[key] = existing.copy(
+                        friendlyName = existing.friendlyName.ifBlank { parsed.friendlyName },
+                        controlUrl = existing.controlUrl.ifBlank { parsed.controlUrl },
+                        serviceType = if (existing.controlUrl.isNotBlank()) existing.serviceType else parsed.serviceType,
+                        dialAppUrl = existing.dialAppUrl.ifBlank { parsed.dialAppUrl },
+                        hostIp = existing.hostIp.ifBlank { parsed.hostIp }
+                    )
                 }
             }
 
-            found.values.toList()
+            foundByHost.values.toList()
         }
 
     suspend fun castMedia(
@@ -284,8 +312,7 @@ class DlnaController(
         if (isYouTubeInput(trimmed)) {
             return@withContext playYouTubeOnDevice(
                 device = device,
-                youtubeUrlOrId = trimmed,
-                title = title
+                youtubeUrlOrId = trimmed
             )
         }
 
@@ -307,10 +334,14 @@ class DlnaController(
         )
     }
 
+    /**
+     * Compliant YouTube TV Playback:
+     * Launches the official YouTube app on the Smart TV via DIAL protocol using the video ID.
+     * Does NOT extract, scrape, or bypass YouTube media streams.
+     */
     suspend fun playYouTubeOnDevice(
         device: DlnaDevice,
-        youtubeUrlOrId: String,
-        title: String = "YouTube Video"
+        youtubeUrlOrId: String
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val videoId = extractYouTubeVideoId(youtubeUrlOrId)
             ?: return@withContext DlnaPlayResult(
@@ -319,49 +350,45 @@ class DlnaController(
             )
 
         val dialCandidates = resolveDialBaseUrls(device)
-        Log.d(TAG, "YouTube videoId=$videoId | DIAL candidates=$dialCandidates")
+        Log.d(TAG, "Launching YouTube via DIAL | videoId=$videoId | candidates=$dialCandidates")
 
         for (dialBase in dialCandidates) {
             if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
                 return@withContext DlnaPlayResult(
                     true,
-                    "${device.friendlyName} ke YouTube app mein video open ho raha hai"
+                    "${device.friendlyName} ke YouTube app mein video play ho raha hai"
                 )
             }
         }
 
-        val resolvedStreamUrl = streamResolver?.invoke(videoId)?.trim().orEmpty()
-        if (
-            resolvedStreamUrl.isNotEmpty() &&
-            isValidHttpUrl(resolvedStreamUrl) &&
-            !isYouTubeWatchUrl(resolvedStreamUrl)
-        ) {
-            val safeTitle = title.trim().ifEmpty { "YouTube ($videoId)" }
-            val playRes = playMediaOnDevice(
-                device = device,
-                mediaUrl = resolvedStreamUrl,
-                title = safeTitle,
-                mimeType = resolveMimeType(resolvedStreamUrl, "video/mp4")
-            )
-            if (playRes.success) {
-                return@withContext DlnaPlayResult(true, "${device.friendlyName} par chal raha hai")
-            }
-            Log.w(TAG, "DLNA YouTube stream play failed: ${playRes.message}")
-            return@withContext DlnaPlayResult(false, "TV stream play fail: ${playRes.message}")
-        }
-
-        Log.w(TAG, "DIAL launch failed and no direct stream URL resolved for videoId=$videoId on ${device.friendlyName}")
+        Log.w(TAG, "DIAL YouTube launch unavailable on ${device.friendlyName}")
         return@withContext DlnaPlayResult(
-            false,
-            "Is TV par YouTube launch ya stream resolve nahi ho paya — TV ka YouTube app ya Cast check karein"
+            success = false,
+            message = "Is TV par YouTube app auto-launch nahi hua. TV par YouTube app kholein ya Cast/Screen Mirroring use karein.",
+            suggestSystemCast = true
         )
     }
 
-    private fun isYouTubeWatchUrl(url: String): Boolean {
-        val lower = url.lowercase(Locale.US)
-        return lower.contains("youtube.com/watch") ||
-            lower.contains("m.youtube.com/watch") ||
-            lower.contains("youtu.be/")
+    /**
+     * Opens Android's built-in Cast / Wireless Display settings when DIAL is blocked by a TV.
+     */
+    fun openSystemCastSettings(): Boolean {
+        val appContext = context?.applicationContext ?: return false
+        return runCatching {
+            val intent = Intent(Settings.ACTION_CAST_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            appContext.startActivity(intent)
+            true
+        }.getOrElse {
+            runCatching {
+                val fallback = Intent(Settings.ACTION_WIFI_DISPLAY_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                appContext.startActivity(fallback)
+                true
+            }.getOrDefault(false)
+        }
     }
 
     private fun resolveDialBaseUrls(device: DlnaDevice): List<String> {
@@ -380,13 +407,20 @@ class DlnaController(
             addDialBase(device.dialAppUrl)
         }
 
-        val host = runCatching { URL(device.controlUrl).host }.getOrNull().orEmpty()
+        val host = device.hostIp.ifBlank {
+            runCatching { URL(device.controlUrl).host }.getOrNull().orEmpty()
+        }
+
         if (host.isNotBlank()) {
+            // Common Smart TV DIAL description endpoints (Android TV, Samsung, LG, Sony, Roku)
             val descUrls = listOf(
                 "http://$host:8008/ssdp/device-desc.xml",
                 "http://$host:8008/dd.xml",
                 "http://$host:8060/dial/dd.xml",
-                "http://$host:56789/dial/dd.xml"
+                "http://$host:56789/dial/dd.xml",
+                "http://$host:7676/smp_2_",
+                "http://$host:36299/dd.xml",
+                "http://$host:52235/dd.xml"
             )
             for (descUrl in descUrls) {
                 val dialFromDesc = probeDialApplicationUrl(descUrl)
@@ -394,9 +428,14 @@ class DlnaController(
                     addDialBase(dialFromDesc)
                 }
             }
+
+            // Standard DIAL app endpoints fallback
             addDialBase("http://$host:8008/apps")
             addDialBase("http://$host:8008/ws/apps")
             addDialBase("http://$host:8060/apps")
+            addDialBase("http://$host:56789/apps")
+            addDialBase("http://$host:36299/apps")
+            addDialBase("http://$host:52235/apps")
         }
 
         return urls.toList()
@@ -407,8 +446,8 @@ class DlnaController(
             var connection: HttpURLConnection? = null
             try {
                 val conn = (URL(descUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 1500
-                    readTimeout = 1500
+                    connectTimeout = 1200
+                    readTimeout = 1200
                     requestMethod = "GET"
                     instanceFollowRedirects = true
                     setRequestProperty("User-Agent", USER_AGENT)
@@ -451,17 +490,22 @@ class DlnaController(
         )
 
         for (endpoint in appEndpoints) {
+            // Quick check if YouTube DIAL endpoint exists on this TV
+            val probeCode = probeDialAppStatus(endpoint)
+            if (probeCode == 404) continue
+
             for ((payload, contentType) in payloads) {
                 val launched = runCatching {
                     var connection: HttpURLConnection? = null
                     try {
                         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 2500
-                            readTimeout = 2500
+                            connectTimeout = 2200
+                            readTimeout = 2200
                             requestMethod = "POST"
                             doOutput = true
                             instanceFollowRedirects = false
                             setRequestProperty("User-Agent", USER_AGENT)
+                            setRequestProperty("Origin", "https://www.youtube.com")
                             setRequestProperty("Content-Type", contentType)
                         }
                         connection = conn
@@ -484,6 +528,25 @@ class DlnaController(
             }
         }
         return false
+    }
+
+    private fun probeDialAppStatus(endpoint: String): Int {
+        return runCatching {
+            var connection: HttpURLConnection? = null
+            try {
+                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 1000
+                    readTimeout = 1000
+                    requestMethod = "GET"
+                    instanceFollowRedirects = false
+                    setRequestProperty("User-Agent", USER_AGENT)
+                }
+                connection = conn
+                conn.responseCode
+            } finally {
+                connection?.disconnect()
+            }
+        }.getOrDefault(-1)
     }
 
     suspend fun playLocalMediaOnDevice(
@@ -549,7 +612,7 @@ class DlnaController(
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val controlUrl = device.controlUrl.trim()
         if (controlUrl.isBlank() || !isValidHttpUrl(controlUrl)) {
-            return@withContext DlnaPlayResult(false, "Invalid or missing Control URL")
+            return@withContext DlnaPlayResult(false, "Is device par DLNA AVTransport control URL nahi mila")
         }
 
         val cleanUrl = mediaUrl.trim()
@@ -820,8 +883,8 @@ class DlnaController(
             try {
                 val baseUrl = URL(locationUrl)
                 val conn = (baseUrl.openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 3000
-                    readTimeout = 3000
+                    connectTimeout = 2500
+                    readTimeout = 2500
                     requestMethod = "GET"
                     instanceFollowRedirects = true
                     setRequestProperty("User-Agent", USER_AGENT)
@@ -843,7 +906,6 @@ class DlnaController(
                 } else {
                     ""
                 }
-                if (!isValidHttpUrl(resolvedControlUrl)) return null
 
                 val resolvedDialUrl = when {
                     headerDial.isNotBlank() && isValidHttpUrl(headerDial) -> headerDial
@@ -852,11 +914,17 @@ class DlnaController(
                     else -> ""
                 }
 
+                val hostIp = baseUrl.host.orEmpty()
+                if (!isValidHttpUrl(resolvedControlUrl) && !isValidHttpUrl(resolvedDialUrl) && hostIp.isBlank()) {
+                    return null
+                }
+
                 DlnaDevice(
                     friendlyName = friendlyName,
                     controlUrl = resolvedControlUrl,
                     serviceType = serviceType ?: "urn:schemas-upnp-org:service:AVTransport:1",
-                    dialAppUrl = resolvedDialUrl
+                    dialAppUrl = resolvedDialUrl,
+                    hostIp = hostIp
                 )
             } finally {
                 connection?.disconnect()
