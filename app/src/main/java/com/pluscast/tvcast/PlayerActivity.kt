@@ -1,6 +1,7 @@
 package com.pluscast.tvcast
 
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
@@ -25,6 +26,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -82,6 +84,7 @@ class PlayerActivity : AppCompatActivity() {
         private const val ACCENT_GOLD = "#FBBF24"
         private const val ICON_CAST_SOFT = "#7DD3FC"
         private const val TEXT_PRIMARY = "#F8FAFC"
+        private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
     }
 
     private val dlnaController by lazy { DlnaController(this) }
@@ -95,6 +98,7 @@ class PlayerActivity : AppCompatActivity() {
     private var unlockPillView: TextView? = null
     private var btnRotate: TextView? = null
     private var btnZoom: TextView? = null
+    private var btnYtApp: TextView? = null
     private var btnLock: TextView? = null
     private var btnCast: ImageButton? = null
 
@@ -250,23 +254,105 @@ class PlayerActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun initYouTubeWebPlayer(videoId: String) {
         playerView?.visibility = View.GONE
+        btnYtApp?.visibility = View.VISIBLE
+
         youtubeWebView?.let { wv ->
             wv.visibility = View.VISIBLE
             wv.settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
+                databaseEnabled = true
                 mediaPlaybackRequiresUserGesture = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                userAgentString = mediaUserAgent.ifEmpty {
+                    "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                }
             }
-            wv.webViewClient = WebViewClient()
+
+            wv.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                    val targetUri = request?.url ?: return false
+                    val scheme = targetUri.scheme?.lowercase(Locale.US).orEmpty()
+                    if (scheme != "http" && scheme != "https") {
+                        openExternalYouTube(targetUri)
+                        return true
+                    }
+                    return false
+                }
+            }
+
             wv.webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     progressBar?.visibility = if (newProgress < 100) View.VISIBLE else View.GONE
                 }
             }
-            val embedUrl = "https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0"
-            wv.loadUrl(embedUrl)
+
+            val embedHtml = """
+                <!DOCTYPE html>
+                <html>
+                <head>
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                  <style>
+                    html, body {
+                      margin: 0;
+                      padding: 0;
+                      width: 100%;
+                      height: 100%;
+                      background-color: #05080F;
+                      overflow: hidden;
+                    }
+                    iframe {
+                      position: absolute;
+                      top: 0;
+                      left: 0;
+                      width: 100%;
+                      height: 100%;
+                      border: 0;
+                    }
+                  </style>
+                </head>
+                <body>
+                  <iframe
+                    src="https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0&modestbranding=1"
+                    allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allowfullscreen>
+                  </iframe>
+                </body>
+                </html>
+            """.trimIndent()
+
+            val baseUrl = mediaReferrer.ifEmpty { "https://www.youtube.com" }
+            wv.loadDataWithBaseURL(baseUrl, embedHtml, "text/html", "UTF-8", baseUrl)
         }
+    }
+
+    private fun openExternalYouTube(uri: Uri) {
+        val appIntent = Intent(Intent.ACTION_VIEW, uri).apply {
+            setPackage(YOUTUBE_PACKAGE)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            startActivity(appIntent)
+        } catch (_: ActivityNotFoundException) {
+            runCatching {
+                startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+        }
+    }
+
+    private fun openCurrentYouTubeInApp() {
+        scheduleAutoHide()
+        val id = youtubeVideoId.ifEmpty { extractYouTubeId(youtubeUrl).orEmpty() }
+        val target = when {
+            id.isNotEmpty() -> Uri.parse("https://www.youtube.com/watch?v=$id")
+            youtubeUrl.isNotEmpty() -> Uri.parse(youtubeUrl)
+            else -> null
+        } ?: run {
+            Toast.makeText(this, "YouTube link nahi mila", Toast.LENGTH_SHORT).show()
+            return
+        }
+        openExternalYouTube(target)
     }
 
     private fun isYouTubeUrlOrId(raw: String): Boolean {
@@ -618,6 +704,34 @@ class PlayerActivity : AppCompatActivity() {
         }
         btnZoom = zoomBtn
 
+        val ytAppBtn = TextView(this).apply {
+            text = "▶ YT App"
+            visibility = View.GONE
+            setTextColor(Color.parseColor(ACCENT_GOLD))
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            isFocusable = true
+            isClickable = true
+            background = createFocusPillDrawable(
+                normalFill = "#CC101826",
+                normalStroke = BORDER_BAR,
+                focusStroke = ACCENT_GOLD,
+                radiusDp = 999
+            )
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            val lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.marginEnd = dp(6)
+            layoutParams = lp
+            setOnClickListener {
+                blinkView(it)
+                openCurrentYouTubeInApp()
+            }
+        }
+        btnYtApp = ytAppBtn
+
         val lockBtn = TextView(this).apply {
             text = "🔒 Lock"
             setTextColor(Color.parseColor(TEXT_PRIMARY))
@@ -668,6 +782,7 @@ class PlayerActivity : AppCompatActivity() {
 
         controlsCluster.addView(rotateBtn)
         controlsCluster.addView(zoomBtn)
+        controlsCluster.addView(ytAppBtn)
         controlsCluster.addView(lockBtn)
         controlsCluster.addView(castBtn)
         root.addView(controlsCluster)
