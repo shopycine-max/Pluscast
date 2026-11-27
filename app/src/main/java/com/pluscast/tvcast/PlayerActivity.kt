@@ -1,5 +1,6 @@
 package com.pluscast.tvcast
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
@@ -23,6 +24,10 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
@@ -84,6 +89,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
+    private var youtubeWebView: WebView? = null
     private var progressBar: ProgressBar? = null
     private var controlsClusterView: View? = null
     private var unlockPillView: TextView? = null
@@ -152,8 +158,11 @@ class PlayerActivity : AppCompatActivity() {
         isYouTubeContent = castMode == CAST_MODE_YOUTUBE || isYouTubeUrlOrId(candidateForYt)
         if (isYouTubeContent) {
             castMode = CAST_MODE_YOUTUBE
-            if (youtubeUrl.isEmpty()) {
-                youtubeUrl = normalizeYouTubeUri(candidateForYt)?.toString().orEmpty()
+            if (youtubeVideoId.isEmpty()) {
+                youtubeVideoId = extractYouTubeId(candidateForYt).orEmpty()
+            }
+            if (youtubeUrl.isEmpty() && youtubeVideoId.isNotEmpty()) {
+                youtubeUrl = "https://www.youtube.com/watch?v=$youtubeVideoId"
             }
         }
 
@@ -209,14 +218,13 @@ class PlayerActivity : AppCompatActivity() {
         syncLockState()
 
         if (isYouTubeContent) {
-            progressBar?.visibility = View.GONE
-            val ytTarget = youtubeUrl.ifEmpty { candidateForYt }
-            if (ytTarget.isEmpty()) {
-                Toast.makeText(this, "YouTube video link nahi mila", Toast.LENGTH_LONG).show()
+            val videoId = youtubeVideoId.ifEmpty { extractYouTubeId(candidateForYt).orEmpty() }
+            if (videoId.isEmpty()) {
+                Toast.makeText(this, "YouTube video ID nahi mila", Toast.LENGTH_LONG).show()
                 finish()
                 return
             }
-            selectedDlnaDevice?.let { castStreamToDevice(it) } ?: discoverAndPickCastDevice()
+            initYouTubeWebPlayer(videoId)
             return
         }
 
@@ -229,6 +237,38 @@ class PlayerActivity : AppCompatActivity() {
         initPlayer(mediaUrl)
     }
 
+    private fun extractYouTubeId(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return trimmed
+        M3uPlaylistParser.extractYouTubeVideoId(trimmed)?.let { return it }
+        val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
+        uri.getQueryParameter("v")?.trim()?.takeIf { it.matches(Regex("^[a-zA-Z0-9_-]{11}$")) }?.let { return it }
+        val last = uri.lastPathSegment?.trim().orEmpty()
+        return if (last.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) last else null
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun initYouTubeWebPlayer(videoId: String) {
+        playerView?.visibility = View.GONE
+        youtubeWebView?.let { wv ->
+            wv.visibility = View.VISIBLE
+            wv.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            }
+            wv.webViewClient = WebViewClient()
+            wv.webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    progressBar?.visibility = if (newProgress < 100) View.VISIBLE else View.GONE
+                }
+            }
+            val embedUrl = "https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0"
+            wv.loadUrl(embedUrl)
+        }
+    }
+
     private fun isYouTubeUrlOrId(raw: String): Boolean {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return false
@@ -239,29 +279,7 @@ class PlayerActivity : AppCompatActivity() {
         ) {
             return true
         }
-        return M3uPlaylistParser.extractYouTubeVideoId(trimmed) != null
-    }
-
-    private fun normalizeYouTubeUri(raw: String): Uri? {
-        val trimmed = raw.trim()
-        if (trimmed.isEmpty()) return null
-        if (trimmed.startsWith("http://", ignoreCase = true) ||
-            trimmed.startsWith("https://", ignoreCase = true)
-        ) {
-            return Uri.parse(trimmed)
-        }
-        val videoId = M3uPlaylistParser.extractYouTubeVideoId(trimmed) ?: return null
-        return Uri.parse("https://www.youtube.com/watch?v=$videoId")
-    }
-
-    fun openYouTubeOnPhone(urlOrId: String): Boolean {
-        val uri = normalizeYouTubeUri(urlOrId) ?: return false
-        return try {
-            startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            true
-        } catch (_: Exception) {
-            false
-        }
+        return extractYouTubeId(trimmed) != null
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -277,18 +295,28 @@ class PlayerActivity : AppCompatActivity() {
             } else {
                 player?.playWhenReady = true
             }
+        } else {
+            youtubeWebView?.onResume()
         }
     }
 
     override fun onStop() {
         autoHideHandler.removeCallbacks(hideControlsRunnable)
         player?.playWhenReady = false
+        if (isYouTubeContent) {
+            youtubeWebView?.onPause()
+        }
         super.onStop()
     }
 
     override fun onDestroy() {
         autoHideHandler.removeCallbacks(hideControlsRunnable)
         releasePlayer()
+        youtubeWebView?.apply {
+            stopLoading()
+            destroy()
+        }
+        youtubeWebView = null
         dlnaController.releaseLocalMediaServer()
         super.onDestroy()
     }
@@ -380,7 +408,7 @@ class PlayerActivity : AppCompatActivity() {
         btnRotate?.text = if (land) "↻ Portrait" else "↻ Landscape"
 
         val zoomButton = btnZoom ?: return
-        if (land) {
+        if (land && !isYouTubeContent) {
             zoomButton.visibility = View.VISIBLE
             zoomButton.isEnabled = true
             applyResizeMode()
@@ -464,41 +492,54 @@ class PlayerActivity : AppCompatActivity() {
         playerView = pv
         root.addView(pv)
 
-        val touchInterceptor = object : View(this) {
-            private var downX = 0f
-            private var downY = 0f
-            private var downTime = 0L
-
-            override fun onTouchEvent(event: MotionEvent): Boolean {
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        downX = event.x
-                        downY = event.y
-                        downTime = System.currentTimeMillis()
-                        return true
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        val dx = abs(event.x - downX)
-                        val dy = abs(event.y - downY)
-                        val dt = System.currentTimeMillis() - downTime
-                        if (dx < dp(24) && dy < dp(24) && dt < 500L) {
-                            blinkControlsOnTouch()
-                        }
-                        return true
-                    }
-                }
-                return super.onTouchEvent(event)
-            }
-        }.apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            isClickable = true
-            isFocusable = false
+        val wv = WebView(this).apply {
+            visibility = View.GONE
+            setBackgroundColor(Color.parseColor(BG_PLAYER))
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
-        root.addView(touchInterceptor)
+        youtubeWebView = wv
+        root.addView(wv)
+
+        if (!isYouTubeContent) {
+            val touchInterceptor = object : View(this) {
+                private var downX = 0f
+                private var downY = 0f
+                private var downTime = 0L
+
+                override fun onTouchEvent(event: MotionEvent): Boolean {
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            downX = event.x
+                            downY = event.y
+                            downTime = System.currentTimeMillis()
+                            return true
+                        }
+                        MotionEvent.ACTION_UP -> {
+                            val dx = abs(event.x - downX)
+                            val dy = abs(event.y - downY)
+                            val dt = System.currentTimeMillis() - downTime
+                            if (dx < dp(24) && dy < dp(24) && dt < 500L) {
+                                blinkControlsOnTouch()
+                            }
+                            return true
+                        }
+                    }
+                    return super.onTouchEvent(event)
+                }
+            }.apply {
+                setBackgroundColor(Color.TRANSPARENT)
+                isClickable = true
+                isFocusable = false
+                layoutParams = FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            }
+            root.addView(touchInterceptor)
+        }
 
         val spinner = ProgressBar(this).apply {
             visibility = View.VISIBLE
