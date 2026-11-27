@@ -35,7 +35,6 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -123,14 +122,8 @@ class MainActivity : AppCompatActivity() {
         private const val TEXT_SECONDARY = "#94A3B8"
     }
 
-    @Volatile
-    private var latestVideoStreamUrl: String? = null
-
     private val dlnaController by lazy {
-        DlnaController(
-            context = this,
-            streamResolver = { _ -> latestVideoStreamUrl }
-        )
+        DlnaController(context = this)
     }
     private var localMediaServer: LocalMediaServer? = null
     private var castContext: CastContext? = null
@@ -758,8 +751,6 @@ class MainActivity : AppCompatActivity() {
         sourceUrl: String
     ) {
         val ytWatchUrl = "https://www.youtube.com/watch?v=$videoId"
-        val capturedStream = latestVideoStreamUrl?.trim().orEmpty()
-        val castTargetUrl = if (capturedStream.isNotEmpty()) capturedStream else ytWatchUrl
 
         saveLastWatched(url = sourceUrl, title = title)
         updateLastWatchedPill()
@@ -780,19 +771,14 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             var anySuccess = false
+            var shouldOfferSystemCast = false
             var lastMsg = ""
 
             if (activeCast != null) {
                 val castLoaded = runCatching {
-                    val mediaInfo = MediaInfo.Builder(castTargetUrl)
+                    val mediaInfo = MediaInfo.Builder(ytWatchUrl)
                         .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
-                        .setContentType(
-                            if (castTargetUrl.contains(".m3u8", ignoreCase = true)) {
-                                "application/x-mpegURL"
-                            } else {
-                                "video/mp4"
-                            }
-                        )
+                        .setContentType("video/mp4")
                         .setMetadata(
                             MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
                                 putString(MediaMetadata.KEY_TITLE, title)
@@ -815,18 +801,29 @@ class MainActivity : AppCompatActivity() {
             if (savedDevice != null) {
                 val dlnaRes = dlnaController.playYouTubeOnDevice(
                     device = savedDevice,
-                    youtubeUrlOrId = videoId,
-                    title = title
+                    youtubeUrlOrId = videoId
                 )
                 if (dlnaRes.success) {
                     anySuccess = true
                     lastMsg = dlnaRes.message
                 } else if (!anySuccess) {
                     lastMsg = dlnaRes.message
+                    shouldOfferSystemCast = dlnaRes.suggestSystemCast
                 }
             }
 
-            if (!isFinishing && !isDestroyed) {
+            if (isFinishing || isDestroyed) return@launch
+
+            if (!anySuccess && shouldOfferSystemCast) {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Cast Options")
+                    .setMessage(lastMsg.ifBlank { "TV par YouTube auto-launch nahi hua." })
+                    .setPositiveButton("Open Cast Settings") { _, _ ->
+                        dlnaController.openSystemCastSettings()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            } else {
                 Toast.makeText(
                     this@MainActivity,
                     lastMsg.ifBlank { "Cast bhej nahi paye" },
@@ -836,28 +833,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== IN-APP YOUTUBE BROWSER (TUBIO STYLE) ====================
+    // ==================== IN-APP YOUTUBE BROWSER ====================
 
     private fun triggerDirectYouTubeFlow() {
         openYouTubeBrowserScreen(initialUrl = YOUTUBE_MOBILE_HOME_URL, title = "YouTube")
-    }
-
-    private fun isCandidateYouTubeMediaStream(url: String): Boolean {
-        val lower = url.lowercase(Locale.US)
-        if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false
-        val isPlayback = lower.contains("googlevideo.com/videoplayback") ||
-            lower.contains(".m3u8") ||
-            lower.contains("manifest.googlevideo.com")
-        if (!isPlayback) return false
-        val isAudioOnly = lower.contains("mime=audio") || lower.contains("mime%3daudio")
-        return !isAudioOnly
     }
 
     private fun openYouTubeBrowserScreen(
         initialUrl: String = YOUTUBE_MOBILE_HOME_URL,
         title: String = "YouTube"
     ) {
-        latestVideoStreamUrl = null
         val normalizedStart = normalizeYouTubeBrowserUrl(initialUrl)
         saveLastWatched(url = normalizedStart, title = title)
         updateLastWatchedPill()
@@ -968,25 +953,11 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
 
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: WebResourceRequest?
-                ): WebResourceResponse? {
-                    val reqUrl = request?.url?.toString().orEmpty()
-                    if (isCandidateYouTubeMediaStream(reqUrl)) {
-                        latestVideoStreamUrl = reqUrl
-                    }
-                    return super.shouldInterceptRequest(view, request)
-                }
-
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     progress.visibility = View.VISIBLE
                     val current = url.orEmpty()
                     if (current.isNotEmpty()) {
-                        if (current.contains("/watch") || current.contains("/shorts/")) {
-                            latestVideoStreamUrl = null
-                        }
                         tvUrl.text = current
                     }
                 }
@@ -1008,9 +979,6 @@ class MainActivity : AppCompatActivity() {
                     super.doUpdateVisitedHistory(view, url, isReload)
                     val current = url.orEmpty()
                     if (current.isNotEmpty()) {
-                        if (current.contains("/watch") || current.contains("/shorts/")) {
-                            latestVideoStreamUrl = null
-                        }
                         tvUrl.text = current
                         saveLastWatched(
                             url = current,
@@ -1073,7 +1041,6 @@ class MainActivity : AppCompatActivity() {
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.parseColor(BG_PRIMARY)))
 
         btnClose.setOnClickListener {
-            latestVideoStreamUrl = null
             runCatching {
                 webView.stopLoading()
                 webView.destroy()
@@ -1105,7 +1072,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialog.setOnDismissListener {
-            latestVideoStreamUrl = null
             runCatching {
                 webView.stopLoading()
                 webView.destroy()
