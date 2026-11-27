@@ -30,6 +30,7 @@ import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Locale
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class DlnaDevice(
@@ -173,12 +174,12 @@ class DlnaController(
                 } else {
                     DatagramSocket()
                 }.apply {
-                    soTimeout = 450
+                    soTimeout = 300
                 }
 
                 multicastSocket = MulticastSocket(SSDP_PORT).apply {
                     reuseAddress = true
-                    soTimeout = 450
+                    soTimeout = 300
                     try {
                         if (networkInterface != null) {
                             setNetworkInterface(networkInterface)
@@ -1030,6 +1031,7 @@ class DlnaController(
         private val running = AtomicBoolean(false)
         private var serverSocket: ServerSocket? = null
         private var acceptThread: Thread? = null
+        private val clientPool = Executors.newCachedThreadPool()
 
         fun startServer(): Int? {
             return try {
@@ -1046,7 +1048,7 @@ class DlnaController(
                     while (running.get()) {
                         try {
                             val client = sock.accept()
-                            Thread({ handleClient(client) }, "PlusCastRelayClient").start()
+                            clientPool.execute { handleClient(client) }
                         } catch (_: SocketTimeoutException) {
                         } catch (_: Exception) {
                             if (!running.get()) break
@@ -1077,6 +1079,7 @@ class DlnaController(
             } catch (_: InterruptedException) {
             }
             acceptThread = null
+            clientPool.shutdownNow()
         }
 
         private fun handleClient(socket: Socket) {
@@ -1102,9 +1105,12 @@ class DlnaController(
                     }
 
                     val totalLen = contentLength.takeIf { it > 0L } ?: -1L
-                    val (startByte, endByte, hasRange) = parseRange(rangeHeader, totalLen)
+                    val hasRange = !rangeHeader.isNullOrBlank() &&
+                        rangeHeader.startsWith("bytes=", ignoreCase = true) &&
+                        totalLen > 0L
+                    val (startByte, endByte, validRange) = parseRange(rangeHeader, totalLen)
 
-                    if (hasRange && totalLen > 0L && (startByte >= totalLen || endByte < startByte)) {
+                    if (hasRange && (!validRange || startByte >= totalLen || endByte < startByte)) {
                         val headers = buildString {
                             append("HTTP/1.1 416 Range Not Satisfiable\r\n")
                             append("Content-Range: bytes */$totalLen\r\n")
@@ -1115,23 +1121,25 @@ class DlnaController(
                         return
                     }
 
-                    val statusLine = if (hasRange && totalLen > 0L) {
+                    val statusLine = if (hasRange) {
                         "HTTP/1.1 206 Partial Content"
                     } else {
                         "HTTP/1.1 200 OK"
                     }
 
-                    val responseLength = if (hasRange && totalLen > 0L) {
-                        (endByte - startByte + 1L).coerceAtLeast(0L)
-                    } else {
-                        totalLen
+                    val responseLength = when {
+                        hasRange -> (endByte - startByte + 1L).coerceAtLeast(0L)
+                        totalLen > 0L -> totalLen
+                        else -> -1L
                     }
 
                     val headerBuilder = StringBuilder().apply {
                         append("$statusLine\r\n")
                         append("Content-Type: $mimeType\r\n")
-                        append("Accept-Ranges: bytes\r\n")
-                        if (hasRange && totalLen > 0L) {
+                        if (totalLen > 0L) {
+                            append("Accept-Ranges: bytes\r\n")
+                        }
+                        if (hasRange) {
                             append("Content-Range: bytes $startByte-$endByte/$totalLen\r\n")
                         }
                         if (responseLength >= 0L) {
@@ -1153,11 +1161,12 @@ class DlnaController(
                     }
 
                     input?.use { stream ->
-                        if (startByte > 0L) {
-                            skipFully(stream, startByte)
+                        val effectiveStart = if (hasRange) startByte.coerceAtLeast(0L) else 0L
+                        if (effectiveStart > 0L) {
+                            skipFully(stream, effectiveStart)
                         }
                         val buffer = ByteArray(64 * 1024)
-                        var remaining = if (hasRange && totalLen > 0L) responseLength else Long.MAX_VALUE
+                        var remaining = if (responseLength >= 0L) responseLength else Long.MAX_VALUE
                         while (running.get() && remaining > 0L) {
                             val toRead = minOf(buffer.size.toLong(), remaining).toInt()
                             val read = stream.read(buffer, 0, toRead)
