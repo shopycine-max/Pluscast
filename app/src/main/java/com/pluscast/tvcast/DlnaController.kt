@@ -134,6 +134,7 @@ class DlnaController(
     }
 
     private var localMediaServer: LocalMediaHttpServer? = null
+    private var remoteStreamServer: RemoteStreamHttpServer? = null
 
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
@@ -356,6 +357,64 @@ class DlnaController(
         )
     }
 
+    suspend fun playCapturedYouTubeStream(
+        device: DlnaDevice,
+        streamUrl: String,
+        title: String = "YouTube Video",
+        userAgent: String = "",
+        referrer: String = "",
+        cookie: String = "",
+        mimeType: String = "video/mp4"
+    ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val resolvedDevice = enrichWithStoredDevice(device)
+        val cleanStreamUrl = streamUrl.trim()
+        if (!isValidHttpUrl(cleanStreamUrl)) {
+            return@withContext DlnaPlayResult(false, "Captured YouTube stream URL invalid hai")
+        }
+
+        val appContext = context?.applicationContext
+            ?: return@withContext DlnaPlayResult(false, "Context unavailable for stream proxy")
+
+        val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
+            ?: return@withContext DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila")
+
+        val effectiveUa = userAgent.trim().ifEmpty {
+            "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        }
+        val effectiveRef = referrer.trim().ifEmpty { "https://m.youtube.com/" }
+
+        remoteStreamServer?.stopServer()
+        val server = RemoteStreamHttpServer(
+            bindIp = localIp,
+            remoteUrl = cleanStreamUrl,
+            mimeType = mimeType.ifBlank { "video/mp4" },
+            userAgent = effectiveUa,
+            referrer = effectiveRef,
+            cookie = cookie.trim()
+        )
+        val port = server.startServer()
+            ?: return@withContext DlnaPlayResult(false, "Stream proxy server start nahi ho saka")
+
+        remoteStreamServer = server
+        val proxyUrl = "http://$localIp:$port/stream"
+        Log.d(TAG, "YouTube proxy stream URL: $proxyUrl -> target=$cleanStreamUrl")
+
+        val result = playMediaOnDevice(
+            device = resolvedDevice,
+            mediaUrl = proxyUrl,
+            title = title.trim().ifEmpty { "YouTube Video" },
+            mimeType = mimeType.ifBlank { "video/mp4" }
+        )
+        if (!result.success) {
+            server.stopServer()
+            if (remoteStreamServer === server) {
+                remoteStreamServer = null
+            }
+        }
+        result
+    }
+
     suspend fun playYouTubeOnDevice(
         device: DlnaDevice,
         youtubeUrlOrId: String
@@ -384,7 +443,7 @@ class DlnaController(
         Log.w(TAG, "Direct DIAL YouTube launch failed on ${resolvedDevice.friendlyName}")
         return@withContext DlnaPlayResult(
             success = false,
-            message = "${resolvedDevice.friendlyName} par YouTube app direct play nahi ho saka. Ensure karein ki TV aur phone ek hi Wi-Fi par hon aur TV par YouTube app active ho.",
+            message = "${resolvedDevice.friendlyName} par YouTube stream/app play nahi ho saka. Video ko WebView mein play karke stream load hone dein ya YT App button try karein.",
             suggestSystemCast = false
         )
     }
@@ -659,6 +718,8 @@ class DlnaController(
     fun releaseLocalMediaServer() {
         localMediaServer?.stopServer()
         localMediaServer = null
+        remoteStreamServer?.stopServer()
+        remoteStreamServer = null
     }
 
     suspend fun playMediaOnDevice(
@@ -897,11 +958,11 @@ class DlnaController(
         return when {
             lower.contains(".m3u8") -> "application/x-mpegURL"
             lower.endsWith(".ts") || lower.contains(".ts?") -> "video/mp2t"
-            lower.contains(".mp4") -> "video/mp4"
+            lower.contains(".mp4") || lower.contains("mime=video%2fmp4") || lower.contains("mime=video/mp4") -> "video/mp4"
             lower.contains(".mkv") -> "video/x-matroska"
-            lower.contains(".webm") -> "video/webm"
+            lower.contains(".webm") || lower.contains("mime=video%2fwebm") || lower.contains("mime=video/webm") -> "video/webm"
             lower.contains(".mp3") -> "audio/mpeg"
-            else -> fallbackMime.ifBlank { "application/x-mpegURL" }
+            else -> fallbackMime.ifBlank { "video/mp4" }
         }
     }
 
@@ -1087,6 +1148,174 @@ class DlnaController(
             .replace(">", "&gt;")
             .replace("\"", "&quot;")
             .replace("'", "&apos;")
+    }
+
+    private class RemoteStreamHttpServer(
+        private val bindIp: String,
+        private val remoteUrl: String,
+        private val mimeType: String,
+        private val userAgent: String,
+        private val referrer: String,
+        private val cookie: String
+    ) {
+        private val running = AtomicBoolean(false)
+        private var serverSocket: ServerSocket? = null
+        private var acceptThread: Thread? = null
+        private val clientPool = Executors.newCachedThreadPool()
+
+        fun startServer(): Int? {
+            return try {
+                val addr = InetAddress.getByName(bindIp)
+                val sock = ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(addr, 0), 16)
+                    soTimeout = 1000
+                }
+                serverSocket = sock
+                running.set(true)
+
+                acceptThread = Thread({
+                    while (running.get()) {
+                        try {
+                            val client = sock.accept()
+                            clientPool.execute { handleClient(client) }
+                        } catch (_: SocketTimeoutException) {
+                        } catch (_: Exception) {
+                            if (!running.get()) break
+                        }
+                    }
+                }, "PlusCastStreamProxy").apply {
+                    isDaemon = true
+                    start()
+                }
+
+                sock.localPort
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start remote stream proxy", e)
+                stopServer()
+                null
+            }
+        }
+
+        fun stopServer() {
+            running.set(false)
+            try {
+                serverSocket?.close()
+            } catch (_: Exception) {
+            }
+            serverSocket = null
+            try {
+                acceptThread?.join(500)
+            } catch (_: InterruptedException) {
+            }
+            acceptThread = null
+            clientPool.shutdownNow()
+        }
+
+        private fun handleClient(socket: Socket) {
+            try {
+                socket.use { client ->
+                    val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
+                    val requestLine = reader.readLine() ?: return
+                    val parts = requestLine.split(" ")
+                    val method = parts.getOrNull(0)?.uppercase(Locale.US).orEmpty()
+
+                    var rangeHeader: String? = null
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.isEmpty()) break
+                        if (line.startsWith("Range:", ignoreCase = true)) {
+                            rangeHeader = line.substringAfter(':').trim()
+                        }
+                    }
+
+                    if (method != "GET" && method != "HEAD") {
+                        writeSimpleResponse(client, "405 Method Not Allowed", "Method Not Allowed")
+                        return
+                    }
+
+                    var upstream: HttpURLConnection? = null
+                    try {
+                        val conn = (URL(remoteUrl).openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 6000
+                            readTimeout = 10000
+                            requestMethod = if (method == "HEAD") "HEAD" else "GET"
+                            instanceFollowRedirects = true
+                            setRequestProperty("User-Agent", userAgent)
+                            if (referrer.isNotBlank()) {
+                                setRequestProperty("Referer", referrer)
+                                setRequestProperty("Origin", "https://m.youtube.com")
+                            }
+                            if (cookie.isNotBlank()) {
+                                setRequestProperty("Cookie", cookie)
+                            }
+                            if (!rangeHeader.isNullOrBlank()) {
+                                setRequestProperty("Range", rangeHeader)
+                            }
+                        }
+                        upstream = conn
+                        val code = conn.responseCode
+                        if (code !in 200..299 && code != 206) {
+                            writeSimpleResponse(client, "502 Bad Gateway", "Upstream HTTP $code")
+                            return
+                        }
+
+                        val upMime = conn.contentType?.substringBefore(';')?.trim()
+                            ?.takeIf { it.isNotEmpty() }
+                            ?: mimeType
+                        val contentLength = conn.contentLengthLong
+                        val contentRange = conn.getHeaderField("Content-Range")
+                        val acceptRanges = conn.getHeaderField("Accept-Ranges") ?: "bytes"
+
+                        val headerBuilder = StringBuilder().apply {
+                            append("HTTP/1.1 $code ${if (code == 206) "Partial Content" else "OK"}\r\n")
+                            append("Content-Type: $upMime\r\n")
+                            append("Accept-Ranges: $acceptRanges\r\n")
+                            if (!contentRange.isNullOrBlank()) {
+                                append("Content-Range: $contentRange\r\n")
+                            }
+                            if (contentLength >= 0L) {
+                                append("Content-Length: $contentLength\r\n")
+                            }
+                            append("Connection: close\r\n\r\n")
+                        }
+
+                        val out = BufferedOutputStream(client.getOutputStream(), 64 * 1024)
+                        out.write(headerBuilder.toString().toByteArray(Charsets.ISO_8859_1))
+                        out.flush()
+
+                        if (method == "HEAD") return
+
+                        conn.inputStream?.use { input ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (running.get()) {
+                                val read = input.read(buffer)
+                                if (read <= 0) break
+                                out.write(buffer, 0, read)
+                            }
+                            out.flush()
+                        }
+                    } finally {
+                        upstream?.disconnect()
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        private fun writeSimpleResponse(socket: Socket, status: String, body: String) {
+            val bytes = body.toByteArray(Charsets.UTF_8)
+            val headers = buildString {
+                append("HTTP/1.1 $status\r\n")
+                append("Content-Type: text/plain; charset=utf-8\r\n")
+                append("Content-Length: ${bytes.size}\r\n")
+                append("Connection: close\r\n\r\n")
+            }
+            val out = socket.getOutputStream()
+            out.write(headers.toByteArray(Charsets.ISO_8859_1))
+            out.write(bytes)
+            out.flush()
+        }
     }
 
     private class LocalMediaHttpServer(
