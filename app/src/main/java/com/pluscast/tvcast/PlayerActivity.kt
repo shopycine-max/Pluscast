@@ -977,6 +977,20 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private suspend fun DlnaController.playCapturedYouTubeStream(
+        device: DlnaDevice,
+        streamUrl: String,
+        title: String,
+        mimeType: String = "video/mp4"
+    ): DlnaPlayResult {
+        return playMediaOnDevice(
+            device = device,
+            mediaUrl = streamUrl,
+            title = title,
+            mimeType = mimeType
+        )
+    }
+
     private fun castStreamToDevice(device: DlnaDevice) {
         Toast.makeText(
             this,
@@ -992,9 +1006,6 @@ class PlayerActivity : AppCompatActivity() {
                             device = device,
                             streamUrl = streamCandidate,
                             title = mediaTitle,
-                            userAgent = capturedStreamUa,
-                            referrer = capturedStreamRef,
-                            cookie = capturedStreamCookie,
                             mimeType = capturedStreamMime
                         )
                         if (proxyRes.success) {
