@@ -130,6 +130,7 @@ class DlnaController(
         private const val USER_AGENT = "PlusCast/1.0 (UPnP/1.0; Android)"
         private const val SSDP_GROUP = "239.255.255.250"
         private const val SSDP_PORT = 1900
+        private val YT_ID_REGEX = Regex("^[a-zA-Z0-9_-]{11}$")
     }
 
     private var localMediaServer: LocalMediaHttpServer? = null
@@ -802,14 +803,14 @@ class DlnaController(
     }
 
     private fun isYouTubeInput(input: String): Boolean {
-        if (input.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return true
+        if (input.matches(YT_ID_REGEX)) return true
         val lower = input.lowercase(Locale.US)
         return lower.contains("youtube.com/") || lower.contains("youtu.be/")
     }
 
     private fun extractYouTubeVideoId(input: String): String? {
         val trimmed = input.trim()
-        if (trimmed.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) {
+        if (trimmed.matches(YT_ID_REGEX)) {
             return trimmed
         }
         val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
@@ -817,11 +818,11 @@ class DlnaController(
 
         if (host.contains("youtu.be")) {
             val seg = uri.lastPathSegment?.trim().orEmpty()
-            if (seg.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return seg
+            if (seg.matches(YT_ID_REGEX)) return seg
         }
 
         uri.getQueryParameter("v")?.trim()?.let { v ->
-            if (v.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return v
+            if (v.matches(YT_ID_REGEX)) return v
         }
 
         val segments = uri.pathSegments.orEmpty()
@@ -829,7 +830,7 @@ class DlnaController(
             val tag = segments[i].lowercase(Locale.US)
             if (tag == "shorts" || tag == "embed" || tag == "live" || tag == "v") {
                 val candidate = segments[i + 1].trim()
-                if (candidate.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return candidate
+                if (candidate.matches(YT_ID_REGEX)) return candidate
             }
         }
         return null
