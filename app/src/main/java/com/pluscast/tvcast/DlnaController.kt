@@ -63,7 +63,10 @@ object DlnaDeviceStore {
         val safeName = device.friendlyName.trim()
         val safeControlUrl = device.controlUrl.trim()
         val safeDialUrl = device.dialAppUrl.trim()
-        if (safeName.isEmpty() || (!isValidHttpUrl(safeControlUrl) && !isValidHttpUrl(safeDialUrl))) return
+        val safeHostIp = device.hostIp.trim()
+        if (safeName.isEmpty() || (!isValidHttpUrl(safeControlUrl) && !isValidHttpUrl(safeDialUrl) && safeHostIp.isEmpty())) {
+            return
+        }
 
         context.applicationContext
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -75,7 +78,7 @@ object DlnaDeviceStore {
                 device.serviceType.trim().ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
             )
             .putString(KEY_DIAL_APP_URL, safeDialUrl)
-            .putString(KEY_HOST_IP, device.hostIp.trim())
+            .putString(KEY_HOST_IP, safeHostIp)
             .apply()
     }
 
@@ -87,7 +90,9 @@ object DlnaDeviceStore {
         val dialAppUrl = prefs.getString(KEY_DIAL_APP_URL, null)?.trim().orEmpty()
         val hostIp = prefs.getString(KEY_HOST_IP, null)?.trim().orEmpty()
 
-        if (name.isEmpty() || (!isValidHttpUrl(controlUrl) && !isValidHttpUrl(dialAppUrl))) return null
+        if (name.isEmpty() || (!isValidHttpUrl(controlUrl) && !isValidHttpUrl(dialAppUrl) && hostIp.isEmpty())) {
+            return null
+        }
 
         val serviceType = prefs.getString(KEY_SERVICE_TYPE, null)?.trim()
             .takeUnless { it.isNullOrEmpty() }
@@ -297,12 +302,29 @@ class DlnaController(
             foundByHost.values.toList()
         }
 
+    private fun enrichWithStoredDevice(device: DlnaDevice): DlnaDevice {
+        val appContext = context?.applicationContext ?: return device
+        val stored = DlnaDeviceStore.getLastDevice(appContext) ?: return device
+        val sameDevice = stored.friendlyName.equals(device.friendlyName, ignoreCase = true) ||
+            (stored.hostIp.isNotBlank() && stored.hostIp == device.hostIp) ||
+            (stored.controlUrl.isNotBlank() && stored.controlUrl == device.controlUrl)
+        if (!sameDevice) return device
+
+        return device.copy(
+            controlUrl = device.controlUrl.ifBlank { stored.controlUrl },
+            serviceType = if (device.controlUrl.isNotBlank()) device.serviceType else stored.serviceType,
+            dialAppUrl = device.dialAppUrl.ifBlank { stored.dialAppUrl },
+            hostIp = device.hostIp.ifBlank { stored.hostIp }
+        )
+    }
+
     suspend fun castMedia(
         device: DlnaDevice,
         mediaUrlOrUri: String,
         title: String = "PlusCast Media",
         mimeType: String = "application/x-mpegURL"
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val enriched = enrichWithStoredDevice(device)
         val trimmed = mediaUrlOrUri.trim()
         if (trimmed.isEmpty()) {
             return@withContext DlnaPlayResult(false, "Empty media URL or URI")
@@ -310,7 +332,7 @@ class DlnaController(
 
         if (isYouTubeInput(trimmed)) {
             return@withContext playYouTubeOnDevice(
-                device = device,
+                device = enriched,
                 youtubeUrlOrId = trimmed
             )
         }
@@ -318,7 +340,7 @@ class DlnaController(
         val lower = trimmed.lowercase(Locale.US)
         if (lower.startsWith("content://") || lower.startsWith("file://")) {
             return@withContext playLocalMediaOnDevice(
-                device = device,
+                device = enriched,
                 uri = Uri.parse(trimmed),
                 title = title,
                 mimeType = mimeType
@@ -326,7 +348,7 @@ class DlnaController(
         }
 
         return@withContext playMediaOnDevice(
-            device = device,
+            device = enriched,
             mediaUrl = trimmed,
             title = title,
             mimeType = mimeType
@@ -337,6 +359,7 @@ class DlnaController(
         device: DlnaDevice,
         youtubeUrlOrId: String
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val resolvedDevice = enrichWithStoredDevice(device)
         val videoId = extractYouTubeVideoId(youtubeUrlOrId)
             ?: return@withContext DlnaPlayResult(
                 false,
@@ -344,23 +367,23 @@ class DlnaController(
                 suggestSystemCast = false
             )
 
-        val dialCandidates = resolveDialBaseUrls(device)
+        val dialCandidates = resolveDialBaseUrls(resolvedDevice)
         Log.d(TAG, "Direct YouTube TV play via DIAL | videoId=$videoId | candidates=$dialCandidates")
 
         for (dialBase in dialCandidates) {
             if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
                 return@withContext DlnaPlayResult(
                     true,
-                    "${device.friendlyName} ke YouTube app mein video play ho raha hai",
+                    "${resolvedDevice.friendlyName} ke YouTube app mein video play ho raha hai",
                     suggestSystemCast = false
                 )
             }
         }
 
-        Log.w(TAG, "Direct DIAL YouTube launch failed on ${device.friendlyName}")
+        Log.w(TAG, "Direct DIAL YouTube launch failed on ${resolvedDevice.friendlyName}")
         return@withContext DlnaPlayResult(
             success = false,
-            message = "${device.friendlyName} par YouTube app direct play nahi ho saka. Ensure karein ki TV aur phone ek hi Wi-Fi par hon aur TV par YouTube app active ho.",
+            message = "${resolvedDevice.friendlyName} par YouTube app direct play nahi ho saka. Ensure karein ki TV aur phone ek hi Wi-Fi par hon aur TV par YouTube app active ho.",
             suggestSystemCast = false
         )
     }
@@ -587,6 +610,7 @@ class DlnaController(
         title: String = "Local Media",
         mimeType: String = "video/mp4"
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val resolvedDevice = enrichWithStoredDevice(device)
         val appContext = context?.applicationContext
             ?: return@withContext DlnaPlayResult(false, "Context unavailable for local media streaming")
 
@@ -617,7 +641,7 @@ class DlnaController(
         Log.d(TAG, "Local media relay URL: $streamUrl (mime=$resolvedMime, size=$fileSize)")
 
         val result = playMediaOnDevice(
-            device = device,
+            device = resolvedDevice,
             mediaUrl = streamUrl,
             title = safeTitle,
             mimeType = resolvedMime
@@ -642,7 +666,8 @@ class DlnaController(
         title: String = "PlusCast IPTV",
         mimeType: String = "application/x-mpegURL"
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
-        val controlUrl = device.controlUrl.trim()
+        val resolvedDevice = enrichWithStoredDevice(device)
+        val controlUrl = resolvedDevice.controlUrl.trim()
         if (controlUrl.isBlank() || !isValidHttpUrl(controlUrl)) {
             return@withContext DlnaPlayResult(false, "Is device par DLNA AVTransport control URL nahi mila")
         }
@@ -656,7 +681,7 @@ class DlnaController(
             return@withContext DlnaPlayResult(false, "Loopback URL TV se reachable nahi hai")
         }
 
-        val serviceUrn = device.serviceType.trim().ifBlank {
+        val serviceUrn = resolvedDevice.serviceType.trim().ifBlank {
             "urn:schemas-upnp-org:service:AVTransport:1"
         }
         val safeTitle = title.trim().ifEmpty { "PlusCast IPTV" }
