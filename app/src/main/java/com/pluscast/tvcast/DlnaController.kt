@@ -365,15 +365,15 @@ class DlnaController(
     fun openSystemCastSettings(): Boolean {
         val appContext = context?.applicationContext ?: return false
         return runCatching {
-            val intent = Intent(Settings.ACTION_CAST_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = android.content.Intent(android.provider.Settings.ACTION_CAST_SETTINGS).apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             appContext.startActivity(intent)
             true
         }.getOrElse {
             runCatching {
-                val fallback = Intent(Settings.ACTION_WIFI_DISPLAY_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                val fallback = android.content.Intent(android.provider.Settings.ACTION_WIFI_DISPLAY_SETTINGS).apply {
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 appContext.startActivity(fallback)
                 true
