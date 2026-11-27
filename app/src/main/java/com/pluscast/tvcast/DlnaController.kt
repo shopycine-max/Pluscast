@@ -357,7 +357,26 @@ class DlnaController(
             }
         }
 
-        Log.w(TAG, "Direct DIAL YouTube launch failed on ${device.friendlyName}")
+        if (device.controlUrl.isNotBlank() && isValidHttpUrl(device.controlUrl)) {
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+            Log.d(TAG, "DIAL failed on ${device.friendlyName}, trying DLNA AVTransport fallback with $watchUrl")
+            val dlnaFallback = playMediaOnDevice(
+                device = device,
+                mediaUrl = watchUrl,
+                title = "YouTube ($videoId)",
+                mimeType = "video/mp4"
+            )
+            if (dlnaFallback.success) {
+                return@withContext DlnaPlayResult(
+                    true,
+                    "${device.friendlyName} par YouTube video play ho raha hai",
+                    suggestSystemCast = false
+                )
+            }
+            Log.w(TAG, "DLNA YouTube fallback failed on ${device.friendlyName}: ${dlnaFallback.message}")
+        }
+
+        Log.w(TAG, "Direct YouTube launch failed on ${device.friendlyName}")
         return@withContext DlnaPlayResult(
             success = false,
             message = "${device.friendlyName} par YouTube app direct play nahi ho saka. Ensure karein ki TV aur phone ek hi Wi-Fi par hon aur TV par YouTube app active ho.",
@@ -422,20 +441,40 @@ class DlnaController(
             addDialBase(device.dialAppUrl)
         }
 
-        val host = device.hostIp.ifBlank {
-            runCatching { URL(device.controlUrl).host }.getOrNull().orEmpty()
+        val controlParsedUrl = runCatching {
+            if (device.controlUrl.isNotBlank()) URL(device.controlUrl) else null
+        }.getOrNull()
+
+        val host = device.hostIp.ifBlank { controlParsedUrl?.host.orEmpty() }
+        val controlPort = controlParsedUrl?.port?.takeIf { it > 0 }
+
+        if (controlParsedUrl != null && host.isNotBlank()) {
+            val effectivePort = controlPort ?: if (controlParsedUrl.protocol.equals("https", true)) 443 else 80
+            val baseOrigin = "${controlParsedUrl.protocol}://$host:$effectivePort"
+            addDialBase("$baseOrigin/apps")
+            addDialBase("$baseOrigin/ws/apps")
+            addDialBase("$baseOrigin/dial/apps")
         }
 
         if (host.isNotBlank()) {
-            val descUrls = listOf(
-                "http://$host:8008/ssdp/device-desc.xml",
-                "http://$host:8008/dd.xml",
-                "http://$host:8060/dial/dd.xml",
-                "http://$host:56789/dial/dd.xml",
-                "http://$host:7676/smp_2_",
-                "http://$host:36299/dd.xml",
-                "http://$host:52235/dd.xml"
-            )
+            val descUrls = buildList {
+                if (controlPort != null) {
+                    add("http://$host:$controlPort/ssdp/device-desc.xml")
+                    add("http://$host:$controlPort/dd.xml")
+                    add("http://$host:$controlPort/dial/dd.xml")
+                }
+                addAll(
+                    listOf(
+                        "http://$host:8008/ssdp/device-desc.xml",
+                        "http://$host:8008/dd.xml",
+                        "http://$host:8060/dial/dd.xml",
+                        "http://$host:56789/dial/dd.xml",
+                        "http://$host:7676/smp_2_",
+                        "http://$host:36299/dd.xml",
+                        "http://$host:52235/dd.xml"
+                    )
+                )
+            }
             for (descUrl in descUrls) {
                 val dialFromDesc = probeDialApplicationUrl(descUrl)
                 if (!dialFromDesc.isNullOrBlank()) {
