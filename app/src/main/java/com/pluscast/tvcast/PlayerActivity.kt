@@ -151,7 +151,7 @@ class PlayerActivity : AppCompatActivity() {
             ?: when (castMode) {
                 CAST_MODE_LOCAL -> localMediaUri
                 CAST_MODE_YOUTUBE -> youtubeUrl.ifEmpty {
-                    if (youtubeVideoId.isNotEmpty()) "https://www.youtube.com/watch?v=$youtubeVideoId" else ""
+                    if (youtubeVideoId.isNotEmpty()) "https://m.youtube.com/watch?v=$youtubeVideoId" else ""
                 }
                 else -> ""
             }
@@ -166,7 +166,7 @@ class PlayerActivity : AppCompatActivity() {
                 youtubeVideoId = extractYouTubeId(candidateForYt).orEmpty()
             }
             if (youtubeUrl.isEmpty() && youtubeVideoId.isNotEmpty()) {
-                youtubeUrl = "https://www.youtube.com/watch?v=$youtubeVideoId"
+                youtubeUrl = "https://m.youtube.com/watch?v=$youtubeVideoId"
             }
         }
 
@@ -223,12 +223,17 @@ class PlayerActivity : AppCompatActivity() {
 
         if (isYouTubeContent) {
             val videoId = youtubeVideoId.ifEmpty { extractYouTubeId(candidateForYt).orEmpty() }
-            if (videoId.isEmpty()) {
-                Toast.makeText(this, "YouTube video ID nahi mila", Toast.LENGTH_LONG).show()
+            val watchUrl = when {
+                videoId.isNotEmpty() -> "https://m.youtube.com/watch?v=$videoId"
+                youtubeUrl.startsWith("http://", true) || youtubeUrl.startsWith("https://", true) -> youtubeUrl
+                else -> ""
+            }
+            if (watchUrl.isEmpty()) {
+                Toast.makeText(this, "YouTube video link nahi mila", Toast.LENGTH_LONG).show()
                 finish()
                 return
             }
-            initYouTubeWebPlayer(videoId)
+            initYouTubeWebPlayer(watchUrl)
             return
         }
 
@@ -252,7 +257,7 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun initYouTubeWebPlayer(videoId: String) {
+    private fun initYouTubeWebPlayer(watchUrl: String) {
         playerView?.visibility = View.GONE
         btnYtApp?.visibility = View.VISIBLE
 
@@ -287,43 +292,16 @@ class PlayerActivity : AppCompatActivity() {
                 }
             }
 
-            val embedHtml = """
-                <!DOCTYPE html>
-                <html>
-                <head>
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                  <style>
-                    html, body {
-                      margin: 0;
-                      padding: 0;
-                      width: 100%;
-                      height: 100%;
-                      background-color: #05080F;
-                      overflow: hidden;
-                    }
-                    iframe {
-                      position: absolute;
-                      top: 0;
-                      left: 0;
-                      width: 100%;
-                      height: 100%;
-                      border: 0;
-                    }
-                  </style>
-                </head>
-                <body>
-                  <iframe
-                    src="https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0&modestbranding=1"
-                    allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
-                    referrerpolicy="strict-origin-when-cross-origin"
-                    allowfullscreen>
-                  </iframe>
-                </body>
-                </html>
-            """.trimIndent()
-
-            val baseUrl = mediaReferrer.ifEmpty { "https://www.youtube.com" }
-            wv.loadDataWithBaseURL(baseUrl, embedHtml, "text/html", "UTF-8", baseUrl)
+            val headers = if (mediaReferrer.isNotEmpty()) {
+                mapOf("Referer" to mediaReferrer)
+            } else {
+                emptyMap()
+            }
+            if (headers.isNotEmpty()) {
+                wv.loadUrl(watchUrl, headers)
+            } else {
+                wv.loadUrl(watchUrl)
+            }
         }
     }
 
