@@ -365,14 +365,16 @@ class DlnaController(
     fun openSystemCastSettings(): Boolean {
         val appContext = context?.applicationContext ?: return false
         return try {
-            val intent = Intent(Settings.ACTION_CAST_SETTINGS)
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = Intent(Settings.ACTION_CAST_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             appContext.startActivity(intent)
             true
         } catch (_: Exception) {
             try {
-                val fallback = Intent(Settings.ACTION_DISPLAY_SETTINGS)
-                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                val fallback = Intent(Settings.ACTION_DISPLAY_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
                 appContext.startActivity(fallback)
                 true
             } catch (_: Exception) {
