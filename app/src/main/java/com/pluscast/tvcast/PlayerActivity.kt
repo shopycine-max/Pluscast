@@ -25,8 +25,10 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -113,6 +115,21 @@ class PlayerActivity : AppCompatActivity() {
     private var localMediaUri: String = ""
     private var localMediaMime: String = ""
     private var isYouTubeContent: Boolean = false
+
+    @Volatile
+    private var capturedStreamUrl: String = ""
+
+    @Volatile
+    private var capturedStreamMime: String = "video/mp4"
+
+    @Volatile
+    private var capturedStreamUa: String = ""
+
+    @Volatile
+    private var capturedStreamRef: String = ""
+
+    @Volatile
+    private var capturedStreamCookie: String = ""
 
     private var isScreenLocked: Boolean = false
     private var zoomModeIndex: Int = 0
@@ -276,6 +293,10 @@ class PlayerActivity : AppCompatActivity() {
         playerView?.visibility = View.GONE
         btnYtApp?.visibility = View.VISIBLE
 
+        val effectiveUa = mediaUserAgent.ifEmpty {
+            "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        }
+
         youtubeWebView?.let { wv ->
             wv.visibility = View.VISIBLE
             wv.settings.apply {
@@ -284,9 +305,7 @@ class PlayerActivity : AppCompatActivity() {
                 databaseEnabled = true
                 mediaPlaybackRequiresUserGesture = false
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                userAgentString = mediaUserAgent.ifEmpty {
-                    "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-                }
+                userAgentString = effectiveUa
             }
 
             wv.webViewClient = object : WebViewClient() {
@@ -298,6 +317,29 @@ class PlayerActivity : AppCompatActivity() {
                         return true
                     }
                     return false
+                }
+
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    val reqUrl = request?.url?.toString().orEmpty()
+                    if (isPlayableVideoStreamUrl(reqUrl)) {
+                        val lower = reqUrl.lowercase(Locale.US)
+                        val isMuxedMp4 = lower.contains("mime=video%2fmp4") || lower.contains("mime=video/mp4")
+                        if (capturedStreamUrl.isEmpty() || isMuxedMp4) {
+                            capturedStreamUrl = reqUrl
+                            capturedStreamMime = if (lower.contains("webm")) "video/webm" else "video/mp4"
+                            capturedStreamUa = request?.requestHeaders?.get("User-Agent").orEmpty().ifBlank { effectiveUa }
+                            capturedStreamRef = request?.requestHeaders?.get("Referer").orEmpty().ifBlank {
+                                mediaReferrer.ifBlank { "https://m.youtube.com/" }
+                            }
+                            capturedStreamCookie = runCatching {
+                                CookieManager.getInstance().getCookie(reqUrl).orEmpty()
+                            }.getOrDefault("")
+                        }
+                    }
+                    return super.shouldInterceptRequest(view, request)
                 }
             }
 
@@ -318,6 +360,14 @@ class PlayerActivity : AppCompatActivity() {
                 wv.loadUrl(watchUrl)
             }
         }
+    }
+
+    private fun isPlayableVideoStreamUrl(url: String): Boolean {
+        if (!isValidHttpUrl(url)) return false
+        val lower = url.lowercase(Locale.US)
+        if (!lower.contains("googlevideo.com/videoplayback")) return false
+        if (lower.contains("mime=audio%2f") || lower.contains("mime=audio/")) return false
+        return true
     }
 
     private fun openExternalYouTube(uri: Uri) {
@@ -936,13 +986,37 @@ class PlayerActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val res = when {
                 isYouTubeContent -> {
-                    val ytTarget = youtubeUrl.ifEmpty {
-                        if (youtubeVideoId.isNotEmpty()) youtubeVideoId else mediaUrl
+                    val streamCandidate = capturedStreamUrl
+                    if (isValidHttpUrl(streamCandidate)) {
+                        val proxyRes = dlnaController.playCapturedYouTubeStream(
+                            device = device,
+                            streamUrl = streamCandidate,
+                            title = mediaTitle,
+                            userAgent = capturedStreamUa,
+                            referrer = capturedStreamRef,
+                            cookie = capturedStreamCookie,
+                            mimeType = capturedStreamMime
+                        )
+                        if (proxyRes.success) {
+                            proxyRes
+                        } else {
+                            val ytTarget = youtubeUrl.ifEmpty {
+                                if (youtubeVideoId.isNotEmpty()) youtubeVideoId else mediaUrl
+                            }
+                            dlnaController.playYouTubeOnDevice(
+                                device = device,
+                                youtubeUrlOrId = ytTarget
+                            )
+                        }
+                    } else {
+                        val ytTarget = youtubeUrl.ifEmpty {
+                            if (youtubeVideoId.isNotEmpty()) youtubeVideoId else mediaUrl
+                        }
+                        dlnaController.playYouTubeOnDevice(
+                            device = device,
+                            youtubeUrlOrId = ytTarget
+                        )
                     }
-                    dlnaController.playYouTubeOnDevice(
-                        device = device,
-                        youtubeUrlOrId = ytTarget
-                    )
                 }
                 castMode == CAST_MODE_LOCAL -> {
                     val targetUri = Uri.parse(localMediaUri.ifEmpty { mediaUrl })
