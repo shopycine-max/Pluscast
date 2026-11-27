@@ -1,6 +1,5 @@
 package com.pluscast.tvcast
 
-import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
@@ -78,7 +77,6 @@ class PlayerActivity : AppCompatActivity() {
         private const val ACCENT_GOLD = "#FBBF24"
         private const val ICON_CAST_SOFT = "#7DD3FC"
         private const val TEXT_PRIMARY = "#F8FAFC"
-        private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
     }
 
     private val dlnaController by lazy { DlnaController(this) }
@@ -103,6 +101,7 @@ class PlayerActivity : AppCompatActivity() {
     private var youtubeVideoId: String = ""
     private var localMediaUri: String = ""
     private var localMediaMime: String = ""
+    private var isYouTubeContent: Boolean = false
 
     private var isScreenLocked: Boolean = false
     private var zoomModeIndex: Int = 0
@@ -150,17 +149,12 @@ class PlayerActivity : AppCompatActivity() {
         val candidateForYt = youtubeUrl.ifEmpty {
             if (youtubeVideoId.isNotEmpty()) youtubeVideoId else rawUrl
         }
-        val isYouTubeTarget = castMode == CAST_MODE_YOUTUBE || isYouTubeUrlOrId(candidateForYt)
-
-        if (isYouTubeTarget) {
-            val ytUri = normalizeYouTubeUri(candidateForYt)
-            if (ytUri != null && openYouTubeDirectly(ytUri)) {
-                finish()
-                return
+        isYouTubeContent = castMode == CAST_MODE_YOUTUBE || isYouTubeUrlOrId(candidateForYt)
+        if (isYouTubeContent) {
+            castMode = CAST_MODE_YOUTUBE
+            if (youtubeUrl.isEmpty()) {
+                youtubeUrl = normalizeYouTubeUri(candidateForYt)?.toString().orEmpty()
             }
-            Toast.makeText(this, "YouTube link open nahi ho saka", Toast.LENGTH_LONG).show()
-            finish()
-            return
         }
 
         mediaUrl = rawUrl.takeIf(::isValidMediaUrl).orEmpty()
@@ -178,6 +172,7 @@ class PlayerActivity : AppCompatActivity() {
                 ?.takeIf { it.isNotEmpty() }
             ?: when (castMode) {
                 CAST_MODE_LOCAL -> "Local Media"
+                CAST_MODE_YOUTUBE -> "YouTube"
                 else -> "PlusCast IPTV"
             }
 
@@ -193,10 +188,14 @@ class PlayerActivity : AppCompatActivity() {
 
         val savedName = intent.getStringExtra("DLNA_DEVICE_NAME")?.trim().orEmpty()
         val savedCtrl = intent.getStringExtra("DLNA_CONTROL_URL")?.trim().orEmpty()
-        if (savedName.isNotEmpty() && isValidHttpUrl(savedCtrl)) {
+        val savedDial = intent.getStringExtra("DLNA_DIAL_APP_URL")?.trim().orEmpty()
+        val savedHost = intent.getStringExtra("DLNA_HOST_IP")?.trim().orEmpty()
+        if (savedName.isNotEmpty() && (isValidHttpUrl(savedCtrl) || isValidHttpUrl(savedDial) || savedHost.isNotEmpty())) {
             selectedDlnaDevice = DlnaDevice(
                 friendlyName = savedName,
-                controlUrl = savedCtrl
+                controlUrl = savedCtrl,
+                dialAppUrl = savedDial,
+                hostIp = savedHost
             )
         } else {
             selectedDlnaDevice = DlnaDeviceStore.getLastDevice(this)
@@ -208,6 +207,18 @@ class PlayerActivity : AppCompatActivity() {
 
         syncOrientationControls(resources.configuration.orientation)
         syncLockState()
+
+        if (isYouTubeContent) {
+            progressBar?.visibility = View.GONE
+            val ytTarget = youtubeUrl.ifEmpty { candidateForYt }
+            if (ytTarget.isEmpty()) {
+                Toast.makeText(this, "YouTube video link nahi mila", Toast.LENGTH_LONG).show()
+                finish()
+                return
+            }
+            selectedDlnaDevice?.let { castStreamToDevice(it) } ?: discoverAndPickCastDevice()
+            return
+        }
 
         if (mediaUrl.isEmpty()) {
             Toast.makeText(this, "Valid media URL ya file nahi mila", Toast.LENGTH_LONG).show()
@@ -243,21 +254,13 @@ class PlayerActivity : AppCompatActivity() {
         return Uri.parse("https://www.youtube.com/watch?v=$videoId")
     }
 
-    private fun openYouTubeDirectly(uri: Uri): Boolean {
-        val ytAppIntent = Intent(Intent.ACTION_VIEW, uri).apply {
-            setPackage(YOUTUBE_PACKAGE)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
+    fun openYouTubeOnPhone(urlOrId: String): Boolean {
+        val uri = normalizeYouTubeUri(urlOrId) ?: return false
         return try {
-            startActivity(ytAppIntent)
+            startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             true
-        } catch (_: ActivityNotFoundException) {
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                true
-            } catch (_: Exception) {
-                false
-            }
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -268,10 +271,12 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (player == null && mediaUrl.isNotEmpty()) {
-            initPlayer(mediaUrl)
-        } else {
-            player?.playWhenReady = true
+        if (!isYouTubeContent) {
+            if (player == null && mediaUrl.isNotEmpty()) {
+                initPlayer(mediaUrl)
+            } else {
+                player?.playWhenReady = true
+            }
         }
     }
 
@@ -780,8 +785,17 @@ class PlayerActivity : AppCompatActivity() {
             Toast.LENGTH_SHORT
         ).show()
         lifecycleScope.launch {
-            val res = when (castMode) {
-                CAST_MODE_LOCAL -> {
+            val res = when {
+                isYouTubeContent -> {
+                    val ytTarget = youtubeUrl.ifEmpty {
+                        if (youtubeVideoId.isNotEmpty()) youtubeVideoId else mediaUrl
+                    }
+                    dlnaController.playYouTubeOnDevice(
+                        device = device,
+                        youtubeUrlOrId = ytTarget
+                    )
+                }
+                castMode == CAST_MODE_LOCAL -> {
                     val targetUri = Uri.parse(localMediaUri.ifEmpty { mediaUrl })
                     dlnaController.playLocalMediaOnDevice(
                         device = device,
