@@ -199,7 +199,6 @@ class DlnaController(
                     }
                 }
 
-                // Send M-SEARCH twice for better UDP reliability on Wi-Fi routers
                 repeat(2) {
                     for (st in searchTargets) {
                         val query = buildString {
@@ -277,7 +276,6 @@ class DlnaController(
                 }
             }
 
-            // Merge DLNA AVTransport and DIAL descriptions per TV IP so both work together
             for ((loc, hintDial) in locations) {
                 val parsed = parseDeviceDescription(loc, hintDial) ?: continue
                 val key = parsed.hostIp.ifBlank { parsed.friendlyName.lowercase(Locale.US) }
@@ -334,11 +332,6 @@ class DlnaController(
         )
     }
 
-    /**
-     * Compliant YouTube TV Playback:
-     * Launches the official YouTube app on the Smart TV via DIAL protocol using the video ID.
-     * Does NOT extract, scrape, or bypass YouTube media streams.
-     */
     suspend fun playYouTubeOnDevice(
         device: DlnaDevice,
         youtubeUrlOrId: String
@@ -369,9 +362,6 @@ class DlnaController(
         )
     }
 
-    /**
-     * Opens Android's built-in Cast / Wireless Display settings when DIAL is blocked by a TV.
-     */
     fun openSystemCastSettings(): Boolean {
         val appContext = context?.applicationContext ?: return false
         return runCatching {
@@ -412,7 +402,6 @@ class DlnaController(
         }
 
         if (host.isNotBlank()) {
-            // Common Smart TV DIAL description endpoints (Android TV, Samsung, LG, Sony, Roku)
             val descUrls = listOf(
                 "http://$host:8008/ssdp/device-desc.xml",
                 "http://$host:8008/dd.xml",
@@ -429,7 +418,6 @@ class DlnaController(
                 }
             }
 
-            // Standard DIAL app endpoints fallback
             addDialBase("http://$host:8008/apps")
             addDialBase("http://$host:8008/ws/apps")
             addDialBase("http://$host:8060/apps")
@@ -490,7 +478,6 @@ class DlnaController(
         )
 
         for (endpoint in appEndpoints) {
-            // Quick check if YouTube DIAL endpoint exists on this TV
             val probeCode = probeDialAppStatus(endpoint)
             if (probeCode == 404) continue
 
