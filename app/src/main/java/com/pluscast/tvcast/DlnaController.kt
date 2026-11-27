@@ -340,26 +340,28 @@ class DlnaController(
         val videoId = extractYouTubeVideoId(youtubeUrlOrId)
             ?: return@withContext DlnaPlayResult(
                 false,
-                "Pehle koi YouTube video open karein (video link/ID nahi mila)"
+                "Pehle koi YouTube video open karein (video link/ID nahi mila)",
+                suggestSystemCast = false
             )
 
         val dialCandidates = resolveDialBaseUrls(device)
-        Log.d(TAG, "Launching YouTube via DIAL | videoId=$videoId | candidates=$dialCandidates")
+        Log.d(TAG, "Direct YouTube TV play via DIAL | videoId=$videoId | candidates=$dialCandidates")
 
         for (dialBase in dialCandidates) {
             if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
                 return@withContext DlnaPlayResult(
                     true,
-                    "${device.friendlyName} ke YouTube app mein video play ho raha hai"
+                    "${device.friendlyName} ke YouTube app mein video play ho raha hai",
+                    suggestSystemCast = false
                 )
             }
         }
 
-        Log.w(TAG, "DIAL YouTube launch unavailable on ${device.friendlyName}")
+        Log.w(TAG, "Direct DIAL YouTube launch failed on ${device.friendlyName}")
         return@withContext DlnaPlayResult(
             success = false,
-            message = "Is TV par YouTube app auto-launch nahi hua. TV par YouTube app kholein ya Cast/Screen Mirroring use karein.",
-            suggestSystemCast = true
+            message = "${device.friendlyName} par YouTube app direct play nahi ho saka. Ensure karein ki TV aur phone ek hi Wi-Fi par hon aur TV par YouTube app active ho.",
+            suggestSystemCast = false
         )
     }
 
@@ -1265,4 +1267,3 @@ class DlnaController(
         }
     }
 }
-
