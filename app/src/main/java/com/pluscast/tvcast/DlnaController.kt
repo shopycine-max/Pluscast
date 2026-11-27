@@ -357,26 +357,7 @@ class DlnaController(
             }
         }
 
-        if (device.controlUrl.isNotBlank() && isValidHttpUrl(device.controlUrl)) {
-            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-            Log.d(TAG, "DIAL failed on ${device.friendlyName}, trying DLNA AVTransport fallback with $watchUrl")
-            val dlnaFallback = playMediaOnDevice(
-                device = device,
-                mediaUrl = watchUrl,
-                title = "YouTube ($videoId)",
-                mimeType = "video/mp4"
-            )
-            if (dlnaFallback.success) {
-                return@withContext DlnaPlayResult(
-                    true,
-                    "${device.friendlyName} par YouTube video play ho raha hai",
-                    suggestSystemCast = false
-                )
-            }
-            Log.w(TAG, "DLNA YouTube fallback failed on ${device.friendlyName}: ${dlnaFallback.message}")
-        }
-
-        Log.w(TAG, "Direct YouTube launch failed on ${device.friendlyName}")
+        Log.w(TAG, "Direct DIAL YouTube launch failed on ${device.friendlyName}")
         return@withContext DlnaPlayResult(
             success = false,
             message = "${device.friendlyName} par YouTube app direct play nahi ho saka. Ensure karein ki TV aur phone ek hi Wi-Fi par hon aur TV par YouTube app active ho.",
