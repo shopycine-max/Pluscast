@@ -256,8 +256,10 @@ class MainActivity : AppCompatActivity() {
         dailyTickerJob?.cancel()
         dailyTickerJob = null
         youtubeStreamSniffer.clear()
-        dlnaController.releaseLocalMediaServer()
-        stopLocalRelayServer()
+        if (getActiveCastSession() == null && DlnaDeviceStore.getLastDevice(this) == null) {
+            dlnaController.releaseLocalMediaServer()
+            stopLocalRelayServer()
+        }
         super.onDestroy()
     }
 
