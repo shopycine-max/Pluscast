@@ -101,8 +101,6 @@ class YouTubeStreamSniffer {
             ?: "https://m.youtube.com/"
 
         val mime = when {
-            url.contains("mime=video%2Fmp4", ignoreCase = true) ||
-                url.contains("mime=video/mp4", ignoreCase = true) -> "video/mp4"
             url.contains("mime=video%2Fwebm", ignoreCase = true) ||
                 url.contains("mime=video/webm", ignoreCase = true) -> "video/webm"
             url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
@@ -128,11 +126,7 @@ class YouTubeStreamSniffer {
         val lower = url.lowercase(Locale.US)
         if (!lower.contains("googlevideo.com/videoplayback")) return false
         val isAudioOnly = lower.contains("mime=audio%2f") || lower.contains("mime=audio/")
-        if (isAudioOnly) return false
-        return lower.contains("mime=video%2fmp4") ||
-            lower.contains("mime=video/mp4") ||
-            lower.contains("mime=video%2fwebm") ||
-            lower.contains("mime=video/webm")
+        return !isAudioOnly
     }
 
     private fun extractVideoId(raw: String): String? {
@@ -436,7 +430,10 @@ class DlnaController(
         mediaUrlOrUri: String,
         title: String = "PlusCast Media",
         mimeType: String = "application/x-mpegURL",
-        capturedStream: CapturedYouTubeStream? = null
+        capturedStream: CapturedYouTubeStream? = null,
+        userAgent: String = "",
+        referrer: String = "",
+        cookie: String = ""
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val enriched = enrichWithStoredDevice(device)
         val trimmed = mediaUrlOrUri.trim()
@@ -464,12 +461,123 @@ class DlnaController(
             )
         }
 
-        return@withContext playMediaOnDevice(
+        return@withContext playIptvOrRemoteStream(
             device = enriched,
             mediaUrl = trimmed,
             title = title,
+            mimeType = mimeType,
+            userAgent = userAgent,
+            referrer = referrer,
+            cookie = cookie
+        )
+    }
+
+    suspend fun playIptvOrRemoteStream(
+        device: DlnaDevice,
+        mediaUrl: String,
+        title: String = "PlusCast IPTV",
+        mimeType: String = "application/x-mpegURL",
+        userAgent: String = "",
+        referrer: String = "",
+        cookie: String = ""
+    ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val resolvedDevice = enrichWithStoredDevice(device)
+        val cleanUrl = mediaUrl.trim()
+        if (!isValidHttpUrl(cleanUrl) || isLoopbackOrLocalhost(cleanUrl)) {
+            return@withContext playMediaOnDevice(
+                device = resolvedDevice,
+                mediaUrl = cleanUrl,
+                title = title,
+                mimeType = mimeType
+            )
+        }
+
+        // 1. Pehle direct DLNA try karein
+        val directResult = playMediaOnDevice(
+            device = resolvedDevice,
+            mediaUrl = cleanUrl,
+            title = title,
             mimeType = mimeType
         )
+        if (directResult.success) {
+            return@withContext directResult
+        }
+
+        // 2. Agar direct fail ho (jaise HTTPS ya header-protected IPTV channel), to local HTTP relay proxy se try karein
+        Log.w(TAG, "Direct DLNA failed for $title (${directResult.message}), trying local HTTP relay")
+        val proxyResult = playViaLocalRelay(
+            device = resolvedDevice,
+            remoteUrl = cleanUrl,
+            title = title,
+            mimeType = resolveMimeType(cleanUrl, mimeType),
+            userAgent = userAgent,
+            referrer = referrer,
+            cookie = cookie
+        )
+        return@withContext if (proxyResult.success) {
+            proxyResult
+        } else {
+            DlnaPlayResult(
+                success = false,
+                message = "$title play nahi ho saka (${directResult.message} / ${proxyResult.message})"
+            )
+        }
+    }
+
+    private suspend fun playViaLocalRelay(
+        device: DlnaDevice,
+        remoteUrl: String,
+        title: String,
+        mimeType: String,
+        userAgent: String,
+        referrer: String,
+        cookie: String
+    ): DlnaPlayResult {
+        val appContext = context?.applicationContext
+            ?: return DlnaPlayResult(false, "Context unavailable for relay")
+        val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
+            ?: return DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila")
+
+        val effectiveUa = userAgent.trim().ifEmpty {
+            "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        }
+        val effectiveRef = referrer.trim().ifEmpty {
+            runCatching {
+                val u = URL(remoteUrl)
+                "${u.protocol}://${u.host}/"
+            }.getOrDefault("")
+        }
+
+        remoteStreamServer?.stopServer()
+        val server = RemoteStreamHttpServer(
+            bindIp = localIp,
+            remoteUrl = remoteUrl,
+            mimeType = mimeType.ifBlank { "application/x-mpegURL" },
+            userAgent = effectiveUa,
+            referrer = effectiveRef,
+            cookie = cookie.trim()
+        )
+        val port = server.startServer()
+            ?: return DlnaPlayResult(false, "Relay server start nahi ho saka")
+
+        remoteStreamServer = server
+        val proxyUrl = "http://$localIp:$port/stream"
+        Log.d(TAG, "Relay URL: $proxyUrl -> target=$remoteUrl")
+
+        val result = playMediaOnDevice(
+            device = device,
+            mediaUrl = proxyUrl,
+            title = title.trim().ifEmpty { "PlusCast IPTV" },
+            mimeType = mimeType.ifBlank { "application/x-mpegURL" }
+        )
+        if (!result.success) {
+            server.stopServer()
+            if (remoteStreamServer === server) {
+                remoteStreamServer = null
+            }
+        }
+        return result
     }
 
     suspend fun playYouTubeTubioStyle(
@@ -556,47 +664,15 @@ class DlnaController(
             return@withContext DlnaPlayResult(false, "Captured YouTube stream URL invalid hai")
         }
 
-        val appContext = context?.applicationContext
-            ?: return@withContext DlnaPlayResult(false, "Context unavailable for stream proxy")
-
-        val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-        val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
-            ?: return@withContext DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila")
-
-        val effectiveUa = userAgent.trim().ifEmpty {
-            "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-        }
-        val effectiveRef = referrer.trim().ifEmpty { "https://m.youtube.com/" }
-
-        remoteStreamServer?.stopServer()
-        val server = RemoteStreamHttpServer(
-            bindIp = localIp,
-            remoteUrl = cleanStreamUrl,
-            mimeType = mimeType.ifBlank { "video/mp4" },
-            userAgent = effectiveUa,
-            referrer = effectiveRef,
-            cookie = cookie.trim()
-        )
-        val port = server.startServer()
-            ?: return@withContext DlnaPlayResult(false, "Stream proxy server start nahi ho saka")
-
-        remoteStreamServer = server
-        val proxyUrl = "http://$localIp:$port/stream"
-        Log.d(TAG, "YouTube proxy stream URL: $proxyUrl -> target=$cleanStreamUrl")
-
-        val result = playMediaOnDevice(
+        playViaLocalRelay(
             device = resolvedDevice,
-            mediaUrl = proxyUrl,
+            remoteUrl = cleanStreamUrl,
             title = title.trim().ifEmpty { "YouTube Video" },
-            mimeType = mimeType.ifBlank { "video/mp4" }
+            mimeType = mimeType.ifBlank { "video/mp4" },
+            userAgent = userAgent,
+            referrer = referrer.ifEmpty { "https://m.youtube.com/" },
+            cookie = cookie
         )
-        if (!result.success) {
-            server.stopServer()
-            if (remoteStreamServer === server) {
-                remoteStreamServer = null
-            }
-        }
-        result
     }
 
     suspend fun playYouTubeOnDevice(
@@ -1405,7 +1481,11 @@ class DlnaController(
                             setRequestProperty("User-Agent", userAgent)
                             if (referrer.isNotBlank()) {
                                 setRequestProperty("Referer", referrer)
-                                setRequestProperty("Origin", "https://m.youtube.com")
+                                val origin = runCatching {
+                                    val u = URL(referrer)
+                                    "${u.protocol}://${u.host}"
+                                }.getOrDefault("https://m.youtube.com")
+                                setRequestProperty("Origin", origin)
                             }
                             if (cookie.isNotBlank()) {
                                 setRequestProperty("Cookie", cookie)
