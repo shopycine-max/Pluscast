@@ -256,6 +256,15 @@ class DlnaController(
         private const val SSDP_GROUP = "239.255.255.250"
         private const val SSDP_PORT = 1900
         private val YT_ID_REGEX = Regex("^[a-zA-Z0-9_-]{11}$")
+        private val SEARCH_TARGETS = listOf(
+            "ssdp:all",
+            "urn:dial-multiscreen-org:service:dial:1",
+            "urn:dial-multiscreen-org:device:dial:1",
+            "urn:schemas-upnp-org:device:MediaRenderer:1",
+            "urn:schemas-upnp-org:service:AVTransport:1",
+            "urn:schemas-upnp-org:service:AVTransport:2",
+            "upnp:rootdevice"
+        )
     }
 
     @Volatile
@@ -288,15 +297,6 @@ class DlnaController(
                     null
                 }
             }
-
-            val searchTargets = listOf(
-                "urn:dial-multiscreen-org:service:dial:1",
-                "urn:dial-multiscreen-org:device:dial:1",
-                "urn:schemas-upnp-org:device:MediaRenderer:1",
-                "urn:schemas-upnp-org:service:AVTransport:1",
-                "urn:schemas-upnp-org:service:AVTransport:2",
-                "upnp:rootdevice"
-            )
 
             var unicastSocket: DatagramSocket? = null
             var multicastSocket: MulticastSocket? = null
@@ -336,7 +336,7 @@ class DlnaController(
                 }
 
                 repeat(2) {
-                    for (st in searchTargets) {
+                    for (st in SEARCH_TARGETS) {
                         val query = buildString {
                             append("M-SEARCH * HTTP/1.1\r\n")
                             append("HOST: $SSDP_GROUP:$SSDP_PORT\r\n")
@@ -553,12 +553,12 @@ class DlnaController(
         userAgent: String,
         referrer: String,
         cookie: String
-    ): DlnaPlayResult {
+    ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val appContext = context?.applicationContext
-            ?: return DlnaPlayResult(false, "Context unavailable for relay")
+            ?: return@withContext DlnaPlayResult(false, "Context unavailable for relay")
         val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
-            ?: return DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila")
+            ?: return@withContext DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila")
 
         val effectiveUa = userAgent.trim().ifEmpty {
             "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
@@ -580,7 +580,7 @@ class DlnaController(
             cookie = cookie.trim()
         )
         val port = server.startServer()
-            ?: return DlnaPlayResult(false, "Relay server start nahi ho saka")
+            ?: return@withContext DlnaPlayResult(false, "Relay server start nahi ho saka")
 
         remoteStreamServer = server
         val proxyUrl = "http://$localIp:$port/stream"
@@ -598,7 +598,7 @@ class DlnaController(
                 remoteStreamServer = null
             }
         }
-        return result
+        result
     }
 
     suspend fun playYouTubeTubioStyle(
@@ -618,7 +618,7 @@ class DlnaController(
             )
 
         val dialCandidates = resolveDialBaseUrls(resolvedDevice)
-        Log.d(TAG, "Tubio-style YouTube -> DIAL check | videoId=$videoId | candidates=$dialCandidates")
+        Log.d(TAG, "Tubio-style YouTube -> DIAL check | device=${resolvedDevice.friendlyName} | videoId=$videoId | candidates=$dialCandidates")
 
         for (dialBase in dialCandidates) {
             if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
@@ -875,8 +875,8 @@ class DlnaController(
                     var connection: HttpURLConnection? = null
                     try {
                         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 2200
-                            readTimeout = 2200
+                            connectTimeout = 2500
+                            readTimeout = 2500
                             requestMethod = "POST"
                             doOutput = true
                             instanceFollowRedirects = false
@@ -892,7 +892,7 @@ class DlnaController(
                         val code = conn.responseCode
                         val loc = conn.getHeaderField("Location")
                         Log.d(TAG, "DIAL POST $endpoint ($payload) -> HTTP $code | Location=$loc")
-                        code in 200..204 || code == 302
+                        code in 200..204 || code == 302 || !loc.isNullOrBlank()
                     } finally {
                         connection?.disconnect()
                     }
@@ -1038,10 +1038,9 @@ class DlnaController(
         val escapedUrl = escapeXml(mediaUrl)
         val escapedTitle = escapeXml(title)
         val escapedMime = escapeXml(mimeType)
-        val protocolInfo = "http-get:*:$escapedMime:*"
 
-        val didl =
-            """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>$upnpClass</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
+        fun buildDidl(protoInfo: String): String =
+            """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>$upnpClass</upnp:class><res protocolInfo="$protoInfo">$escapedUrl</res></item></DIDL-Lite>"""
 
         fun buildSetUriSoap(metaDataXml: String): String = """
             <?xml version="1.0" encoding="utf-8"?>
@@ -1056,11 +1055,21 @@ class DlnaController(
             </s:Envelope>
         """.trimIndent()
 
-        var setUriRes = sendSoapAction(
-            controlUrl = controlUrl,
-            soapAction = "\"$serviceUrn#SetAVTransportURI\"",
-            body = buildSetUriSoap(didl)
+        val protocolCandidates = listOf(
+            "http-get:*:$escapedMime:*",
+            "*:*:$escapedMime:*",
+            "http-get:*:*:*"
         )
+
+        var setUriRes = DlnaPlayResult(false, "SetURI fail")
+        for (proto in protocolCandidates) {
+            setUriRes = sendSoapAction(
+                controlUrl = controlUrl,
+                soapAction = "\"$serviceUrn#SetAVTransportURI\"",
+                body = buildSetUriSoap(buildDidl(proto))
+            )
+            if (setUriRes.success) break
+        }
 
         if (!setUriRes.success) {
             Log.w(TAG, "SetAVTransportURI with DIDL failed (${setUriRes.message}), retrying with empty metadata")
