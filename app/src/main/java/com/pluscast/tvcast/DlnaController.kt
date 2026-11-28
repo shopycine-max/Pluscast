@@ -7,6 +7,7 @@ import android.net.wifi.WifiManager
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.util.Log
+import android.webkit.CookieManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -49,6 +50,116 @@ data class DlnaPlayResult(
     val message: String,
     val suggestSystemCast: Boolean = false
 )
+
+data class CapturedYouTubeStream(
+    val videoId: String,
+    val streamUrl: String,
+    val title: String,
+    val mimeType: String,
+    val userAgent: String,
+    val referrer: String,
+    val cookie: String
+)
+
+class YouTubeStreamSniffer {
+
+    @Volatile
+    var latestStream: CapturedYouTubeStream? = null
+        private set
+
+    fun onPageTitleUpdated(currentUrl: String?, title: String?) {
+        val current = latestStream ?: return
+        val vid = currentUrl?.let { extractVideoId(it) }
+        if (vid != null && vid == current.videoId && !title.isNullOrBlank()) {
+            latestStream = current.copy(title = title.trim())
+        }
+    }
+
+    fun inspectRequest(
+        pageUrl: String?,
+        requestUrl: String?,
+        headers: Map<String, String>?,
+        currentTitle: String?
+    ) {
+        val url = requestUrl?.trim().orEmpty()
+        if (!url.startsWith("http://", ignoreCase = true) &&
+            !url.startsWith("https://", ignoreCase = true)
+        ) {
+            return
+        }
+        if (!isPlayableYouTubeMediaUrl(url)) return
+
+        val videoId = pageUrl?.let { extractVideoId(it) }
+            ?: latestStream?.videoId
+            ?: "unknown"
+
+        val cookie = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
+        val ua = headers?.entries?.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+            ?: "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        val ref = headers?.entries?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
+            ?: pageUrl?.takeIf { it.isNotBlank() }
+            ?: "https://m.youtube.com/"
+
+        val mime = when {
+            url.contains("mime=video%2Fmp4", ignoreCase = true) ||
+                url.contains("mime=video/mp4", ignoreCase = true) -> "video/mp4"
+            url.contains("mime=video%2Fwebm", ignoreCase = true) ||
+                url.contains("mime=video/webm", ignoreCase = true) -> "video/webm"
+            url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
+            else -> "video/mp4"
+        }
+
+        latestStream = CapturedYouTubeStream(
+            videoId = videoId,
+            streamUrl = url,
+            title = currentTitle?.trim()?.takeIf { it.isNotEmpty() } ?: "YouTube Video ($videoId)",
+            mimeType = mime,
+            userAgent = ua,
+            referrer = ref,
+            cookie = cookie
+        )
+    }
+
+    fun clear() {
+        latestStream = null
+    }
+
+    private fun isPlayableYouTubeMediaUrl(url: String): Boolean {
+        val lower = url.lowercase(Locale.US)
+        if (!lower.contains("googlevideo.com/videoplayback")) return false
+        val isAudioOnly = lower.contains("mime=audio%2f") || lower.contains("mime=audio/")
+        if (isAudioOnly) return false
+        return lower.contains("mime=video%2fmp4") ||
+            lower.contains("mime=video/mp4") ||
+            lower.contains("mime=video%2fwebm") ||
+            lower.contains("mime=video/webm")
+    }
+
+    private fun extractVideoId(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return trimmed
+        val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
+        val host = uri.host?.lowercase(Locale.US).orEmpty()
+
+        if (host.contains("youtu.be")) {
+            val seg = uri.lastPathSegment?.trim().orEmpty()
+            if (seg.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return seg
+        }
+
+        uri.getQueryParameter("v")?.trim()
+            ?.takeIf { it.matches(Regex("^[a-zA-Z0-9_-]{11}$")) }
+            ?.let { return it }
+
+        val segs = uri.pathSegments.orEmpty()
+        for (i in 0 until segs.size - 1) {
+            if (segs[i].lowercase(Locale.US) in setOf("shorts", "embed", "live", "v")) {
+                val cand = segs[i + 1].trim()
+                if (cand.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return cand
+            }
+        }
+        return null
+    }
+}
 
 object DlnaDeviceStore {
 
@@ -324,7 +435,8 @@ class DlnaController(
         device: DlnaDevice,
         mediaUrlOrUri: String,
         title: String = "PlusCast Media",
-        mimeType: String = "application/x-mpegURL"
+        mimeType: String = "application/x-mpegURL",
+        capturedStream: CapturedYouTubeStream? = null
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val enriched = enrichWithStoredDevice(device)
         val trimmed = mediaUrlOrUri.trim()
@@ -333,9 +445,12 @@ class DlnaController(
         }
 
         if (isYouTubeInput(trimmed)) {
-            return@withContext playYouTubeOnDevice(
+            return@withContext playYouTubeTubioStyle(
                 device = enriched,
-                youtubeUrlOrId = trimmed
+                youtubeUrlOrId = trimmed,
+                capturedStream = capturedStream,
+                fallbackTitle = title,
+                fallbackMimeType = mimeType
             )
         }
 
@@ -354,6 +469,75 @@ class DlnaController(
             mediaUrl = trimmed,
             title = title,
             mimeType = mimeType
+        )
+    }
+
+    suspend fun playYouTubeTubioStyle(
+        device: DlnaDevice,
+        youtubeUrlOrId: String,
+        capturedStream: CapturedYouTubeStream? = null,
+        fallbackTitle: String = "YouTube Video",
+        fallbackMimeType: String = "video/mp4"
+    ): DlnaPlayResult = withContext(Dispatchers.IO) {
+        val resolvedDevice = enrichWithStoredDevice(device)
+        val videoId = extractYouTubeVideoId(youtubeUrlOrId)
+            ?: capturedStream?.videoId?.takeIf { it.matches(YT_ID_REGEX) }
+            ?: return@withContext DlnaPlayResult(
+                success = false,
+                message = "Pehle koi YouTube video open karein (video link/ID nahi mila)",
+                suggestSystemCast = false
+            )
+
+        // 1. Pehle DIAL se TV/STB ke YouTube app mein video launch try karein
+        val dialCandidates = resolveDialBaseUrls(resolvedDevice)
+        Log.d(TAG, "Tubio-style YouTube -> DIAL check | videoId=$videoId | candidates=$dialCandidates")
+
+        for (dialBase in dialCandidates) {
+            if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
+                return@withContext DlnaPlayResult(
+                    success = true,
+                    message = "${resolvedDevice.friendlyName} ke YouTube app mein video play ho raha hai",
+                    suggestSystemCast = false
+                )
+            }
+        }
+
+        // 2. DIAL fail ho to captured stream ko local HTTP proxy + DLNA AVTransport se play karein
+        val matchingStream = capturedStream?.takeIf {
+            it.videoId == "unknown" || it.videoId == videoId
+        }
+        val cleanStreamUrl = matchingStream?.streamUrl?.trim().orEmpty()
+
+        if (isValidHttpUrl(cleanStreamUrl) && resolvedDevice.controlUrl.isNotBlank()) {
+            Log.d(TAG, "Tubio-style YouTube -> DIAL unavailable, trying DLNA proxy for captured stream")
+            val proxyResult = playCapturedYouTubeStream(
+                device = resolvedDevice,
+                streamUrl = cleanStreamUrl,
+                title = matchingStream?.title?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: fallbackTitle.trim().ifEmpty { "YouTube Video ($videoId)" },
+                userAgent = matchingStream?.userAgent.orEmpty(),
+                referrer = matchingStream?.referrer.orEmpty(),
+                cookie = matchingStream?.cookie.orEmpty(),
+                mimeType = matchingStream?.mimeType?.ifBlank { fallbackMimeType } ?: fallbackMimeType
+            )
+            if (proxyResult.success) {
+                return@withContext DlnaPlayResult(
+                    success = true,
+                    message = "${resolvedDevice.friendlyName} par YouTube stream play ho raha hai",
+                    suggestSystemCast = false
+                )
+            }
+        }
+
+        // 3. Dono fail hon to clear guidance dein
+        return@withContext DlnaPlayResult(
+            success = false,
+            message = if (cleanStreamUrl.isBlank()) {
+                "${resolvedDevice.friendlyName} par YouTube stream/app play nahi ho saka. Video ko WebView mein play karke stream load hone dein ya YT App button try karein."
+            } else {
+                "${resolvedDevice.friendlyName} par YouTube DIAL aur DLNA stream dono play nahi ho sake."
+            },
+            suggestSystemCast = resolvedDevice.controlUrl.isBlank()
         )
     }
 
@@ -417,36 +601,13 @@ class DlnaController(
 
     suspend fun playYouTubeOnDevice(
         device: DlnaDevice,
-        youtubeUrlOrId: String
-    ): DlnaPlayResult = withContext(Dispatchers.IO) {
-        val resolvedDevice = enrichWithStoredDevice(device)
-        val videoId = extractYouTubeVideoId(youtubeUrlOrId)
-            ?: return@withContext DlnaPlayResult(
-                false,
-                "Pehle koi YouTube video open karein (video link/ID nahi mila)",
-                suggestSystemCast = false
-            )
-
-        val dialCandidates = resolveDialBaseUrls(resolvedDevice)
-        Log.d(TAG, "Direct YouTube TV play via DIAL | videoId=$videoId | candidates=$dialCandidates")
-
-        for (dialBase in dialCandidates) {
-            if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
-                return@withContext DlnaPlayResult(
-                    true,
-                    "${resolvedDevice.friendlyName} ke YouTube app mein video play ho raha hai",
-                    suggestSystemCast = false
-                )
-            }
-        }
-
-        Log.w(TAG, "Direct DIAL YouTube launch failed on ${resolvedDevice.friendlyName}")
-        return@withContext DlnaPlayResult(
-            success = false,
-            message = "${resolvedDevice.friendlyName} par YouTube stream/app play nahi ho saka. Video ko WebView mein play karke stream load hone dein ya YT App button try karein.",
-            suggestSystemCast = false
-        )
-    }
+        youtubeUrlOrId: String,
+        capturedStream: CapturedYouTubeStream? = null
+    ): DlnaPlayResult = playYouTubeTubioStyle(
+        device = device,
+        youtubeUrlOrId = youtubeUrlOrId,
+        capturedStream = capturedStream
+    )
 
     fun openYouTubeOnPhone(youtubeUrlOrId: String): Boolean {
         val appContext = context?.applicationContext ?: return false
@@ -631,7 +792,7 @@ class DlnaController(
                         val code = conn.responseCode
                         val loc = conn.getHeaderField("Location")
                         Log.d(TAG, "DIAL POST $endpoint ($payload) -> HTTP $code | Location=$loc")
-                        code in 200..204
+                        code in 200..204 || code == 302
                     } finally {
                         connection?.disconnect()
                     }
