@@ -872,6 +872,10 @@ class MainActivity : AppCompatActivity() {
         saveLastWatched(url = normalizedStart, title = title)
         updateLastWatchedPill()
 
+        var latestPageUrl = normalizedStart
+        var latestPageTitle = title
+        var activeVideoId = M3uPlaylistParser.extractYouTubeVideoId(normalizedStart).orEmpty()
+
         CookieManager.getInstance().setAcceptCookie(true)
 
         val dialog = Dialog(this, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
@@ -968,7 +972,10 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onReceivedTitle(view: WebView?, pageTitle: String?) {
                     super.onReceivedTitle(view, pageTitle)
-                    youtubeStreamSniffer.onPageTitleUpdated(view?.url, pageTitle)
+                    if (!pageTitle.isNullOrBlank()) {
+                        latestPageTitle = pageTitle.trim()
+                    }
+                    youtubeStreamSniffer.onPageTitleUpdated(latestPageUrl, latestPageTitle)
                 }
             }
             webViewClient = object : WebViewClient() {
@@ -989,13 +996,11 @@ class MainActivity : AppCompatActivity() {
                 ): WebResourceResponse? {
                     val reqUrl = request?.url?.toString().orEmpty()
                     if (reqUrl.isNotEmpty()) {
-                        val pageUrl = runCatching { view?.url }.getOrNull()
-                        val pageTitle = runCatching { view?.title }.getOrNull()
                         youtubeStreamSniffer.inspectRequest(
-                            pageUrl = pageUrl,
+                            pageUrl = latestPageUrl,
                             requestUrl = reqUrl,
                             headers = request?.requestHeaders,
-                            currentTitle = pageTitle
+                            currentTitle = latestPageTitle
                         )
                     }
                     return super.shouldInterceptRequest(view, request)
@@ -1006,7 +1011,13 @@ class MainActivity : AppCompatActivity() {
                     progress.visibility = View.VISIBLE
                     val current = url.orEmpty()
                     if (current.isNotEmpty()) {
+                        latestPageUrl = current
                         tvUrl.text = current
+                        val vid = M3uPlaylistParser.extractYouTubeVideoId(current).orEmpty()
+                        if (vid.isNotEmpty() && vid != activeVideoId) {
+                            activeVideoId = vid
+                            youtubeStreamSniffer.clear()
+                        }
                     }
                 }
 
@@ -1014,8 +1025,9 @@ class MainActivity : AppCompatActivity() {
                     progress.visibility = View.GONE
                     val current = url.orEmpty()
                     if (current.isNotEmpty()) {
+                        latestPageUrl = current
                         tvUrl.text = current
-                        val pageTitle = view?.title?.takeIf { it.isNotBlank() } ?: title
+                        val pageTitle = latestPageTitle.takeIf { it.isNotBlank() } ?: title
                         youtubeStreamSniffer.onPageTitleUpdated(current, pageTitle)
                         saveLastWatched(
                             url = current,
@@ -1029,8 +1041,14 @@ class MainActivity : AppCompatActivity() {
                     super.doUpdateVisitedHistory(view, url, isReload)
                     val current = url.orEmpty()
                     if (current.isNotEmpty()) {
+                        latestPageUrl = current
                         tvUrl.text = current
-                        val pageTitle = view?.title?.takeIf { it.isNotBlank() } ?: title
+                        val vid = M3uPlaylistParser.extractYouTubeVideoId(current).orEmpty()
+                        if (vid.isNotEmpty() && vid != activeVideoId) {
+                            activeVideoId = vid
+                            youtubeStreamSniffer.clear()
+                        }
+                        val pageTitle = latestPageTitle.takeIf { it.isNotBlank() } ?: title
                         youtubeStreamSniffer.onPageTitleUpdated(current, pageTitle)
                         saveLastWatched(
                             url = current,
@@ -1101,10 +1119,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnCastCurrent.setOnClickListener {
-            val currentUrl = webView.url?.trim().orEmpty().ifEmpty {
+            val currentUrl = latestPageUrl.trim().ifEmpty {
                 tvUrl.text?.toString()?.trim().orEmpty().ifEmpty { normalizedStart }
             }
-            val currentTitle = webView.title?.trim()?.takeIf { it.isNotBlank() } ?: title
+            val currentTitle = latestPageTitle.trim().takeIf { it.isNotBlank() } ?: title
             val videoId = M3uPlaylistParser.extractYouTubeVideoId(currentUrl).orEmpty()
 
             if (videoId.isEmpty()) {
