@@ -1526,7 +1526,7 @@ class DlnaController(
         private fun handleClient(socket: Socket) {
             try {
                 socket.use { client ->
-                    client.soTimeout = 15000
+                    client.soTimeout = 20000
                     val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
                     val requestLine = reader.readLine() ?: return
                     val parts = requestLine.split(" ")
@@ -1578,17 +1578,18 @@ class DlnaController(
                         }
 
                         val upMime = conn.contentType?.substringBefore(';')?.trim()
-                            ?.takeIf { it.isNotEmpty() }
+                            ?.takeIf { it.isNotEmpty() && !it.equals("application/octet-stream", ignoreCase = true) }
                             ?: mimeType
                         val contentLength = conn.contentLengthLong
                         val contentRange = conn.getHeaderField("Content-Range")
                         val acceptRanges = conn.getHeaderField("Accept-Ranges") ?: "bytes"
+                        val statusText = if (code == 206) "Partial Content" else "OK"
 
                         val headerBuilder = StringBuilder().apply {
-                            append("HTTP/1.1 $code ${if (code == 206) "Partial Content" else "OK"}\r\n")
+                            append("HTTP/1.1 $code $statusText\r\n")
                             append("Content-Type: $upMime\r\n")
                             append("Accept-Ranges: $acceptRanges\r\n")
-                            if (!contentRange.isNullOrBlank()) {
+                            if (code == 206 && !contentRange.isNullOrBlank()) {
                                 append("Content-Range: $contentRange\r\n")
                             }
                             if (contentLength >= 0L) {
