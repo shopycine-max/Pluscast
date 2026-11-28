@@ -5,7 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.provider.OpenableColumns
-import android.provider.Settings
 import android.util.Log
 import android.webkit.CookieManager
 import kotlinx.coroutines.Dispatchers
@@ -461,7 +460,7 @@ class DlnaController(
         val enriched = enrichWithStoredDevice(device)
         val trimmed = mediaUrlOrUri.trim()
         if (trimmed.isEmpty()) {
-            return@withContext DlnaPlayResult(false, "Empty media URL or URI")
+            return@withContext DlnaPlayResult(false, "Empty media URL or URI", suggestSystemCast = false)
         }
 
         if (isYouTubeInput(trimmed)) {
@@ -540,7 +539,8 @@ class DlnaController(
         } else {
             DlnaPlayResult(
                 success = false,
-                message = "$title play nahi ho saka (${directResult.message} / ${proxyResult.message})"
+                message = "$title play nahi ho saka (${directResult.message} / ${proxyResult.message})",
+                suggestSystemCast = false
             )
         }
     }
@@ -555,10 +555,10 @@ class DlnaController(
         cookie: String
     ): DlnaPlayResult {
         val appContext = context?.applicationContext
-            ?: return DlnaPlayResult(false, "Context unavailable for relay")
+            ?: return DlnaPlayResult(false, "Context unavailable for relay", suggestSystemCast = false)
         val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
-            ?: return DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila")
+            ?: return DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila", suggestSystemCast = false)
 
         val effectiveUa = userAgent.trim().ifEmpty {
             "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
@@ -580,7 +580,7 @@ class DlnaController(
             cookie = cookie.trim()
         )
         val port = server.startServer()
-            ?: return DlnaPlayResult(false, "Relay server start nahi ho saka")
+            ?: return DlnaPlayResult(false, "Relay server start nahi ho saka", suggestSystemCast = false)
 
         remoteStreamServer = server
         val proxyUrl = "http://$localIp:$port/stream"
@@ -598,7 +598,7 @@ class DlnaController(
                 remoteStreamServer = null
             }
         }
-        return result
+        return result.copy(suggestSystemCast = false)
     }
 
     suspend fun playYouTubeTubioStyle(
@@ -618,10 +618,11 @@ class DlnaController(
             )
 
         val dialCandidates = resolveDialBaseUrls(resolvedDevice)
-        Log.d(TAG, "Tubio-style YouTube -> DIAL check | videoId=$videoId | candidates=$dialCandidates")
+        Log.d(TAG, "YouTube -> DIAL check | videoId=$videoId | candidates=$dialCandidates")
 
         for (dialBase in dialCandidates) {
             if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
+                delay(1200)
                 return@withContext DlnaPlayResult(
                     success = true,
                     message = "${resolvedDevice.friendlyName} ke YouTube app mein video play ho raha hai",
@@ -630,13 +631,19 @@ class DlnaController(
             }
         }
 
+        // DIAL nahi mila: raw googlevideo DASH/unmuxed URLs ko DLNA AVTransport par bhejne se TV par
+        // black screen + 1-2s buffer ke baad wapas DLNA screen aati hai. Isliye DLNA fallback
+        // sirf tab try karein jab stream URL non-googlevideo ya clearly muxed progressive mp4/m3u8 lage.
         val matchingStream = capturedStream?.takeIf {
             it.videoId == "unknown" || it.videoId == videoId
         }
         val cleanStreamUrl = matchingStream?.streamUrl?.trim().orEmpty()
 
-        if (isValidHttpUrl(cleanStreamUrl) && resolvedDevice.controlUrl.isNotBlank()) {
-            Log.d(TAG, "Tubio-style YouTube -> DIAL unavailable, trying DLNA proxy for captured stream (mime=${matchingStream?.mimeType})")
+        if (isValidHttpUrl(cleanStreamUrl) &&
+            resolvedDevice.controlUrl.isNotBlank() &&
+            isSafeForDlnaFallback(cleanStreamUrl)
+        ) {
+            Log.d(TAG, "DIAL unavailable; trying DLNA relay for compatible stream: $cleanStreamUrl")
             val proxyResult = playCapturedYouTubeStream(
                 device = resolvedDevice,
                 streamUrl = cleanStreamUrl,
@@ -653,24 +660,23 @@ class DlnaController(
                     message = "${resolvedDevice.friendlyName} par YouTube stream play ho raha hai",
                     suggestSystemCast = false
                 )
-            } else {
-                return@withContext DlnaPlayResult(
-                    success = false,
-                    message = "${resolvedDevice.friendlyName} par YouTube stream play nahi ho saka (${proxyResult.message})",
-                    suggestSystemCast = true
-                )
             }
         }
 
         return@withContext DlnaPlayResult(
             success = false,
-            message = if (cleanStreamUrl.isBlank()) {
-                "${resolvedDevice.friendlyName} par YouTube stream/app play nahi ho saka. Video ko WebView mein play karke stream load hone dein."
-            } else {
-                "${resolvedDevice.friendlyName} par YouTube DIAL aur DLNA stream dono play nahi ho sake."
-            },
-            suggestSystemCast = true
+            message = "${resolvedDevice.friendlyName} par YouTube app launch nahi ho saka. TV par YouTube app khula rakhein ya same Wi-Fi par DIAL check karein.",
+            suggestSystemCast = false
         )
+    }
+
+    private fun isSafeForDlnaFallback(url: String): Boolean {
+        val lower = url.lowercase(Locale.US)
+        // googlevideo videoplayback links aksar adaptive/DASH ya session-bound hote hain jo DLNA par STOP ho jaate hain
+        if (lower.contains("googlevideo.com/videoplayback")) {
+            return false
+        }
+        return lower.contains(".m3u8") || lower.contains(".mp4") || lower.contains(".mpd")
     }
 
     suspend fun playCapturedYouTubeStream(
@@ -685,7 +691,7 @@ class DlnaController(
         val resolvedDevice = enrichWithStoredDevice(device)
         val cleanStreamUrl = streamUrl.trim()
         if (!isValidHttpUrl(cleanStreamUrl)) {
-            return@withContext DlnaPlayResult(false, "Captured YouTube stream URL invalid hai")
+            return@withContext DlnaPlayResult(false, "Captured YouTube stream URL invalid hai", suggestSystemCast = false)
         }
 
         playViaLocalRelay(
@@ -726,27 +732,6 @@ class DlnaController(
             true
         } catch (_: Exception) {
             false
-        }
-    }
-
-    fun openSystemCastSettings(): Boolean {
-        val appContext = context?.applicationContext ?: return false
-        return try {
-            val intent = Intent(Settings.ACTION_CAST_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            appContext.startActivity(intent)
-            true
-        } catch (_: Exception) {
-            try {
-                val fallback = Intent(Settings.ACTION_DISPLAY_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                appContext.startActivity(fallback)
-                true
-            } catch (_: Exception) {
-                false
-            }
         }
     }
 
@@ -933,11 +918,11 @@ class DlnaController(
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val resolvedDevice = enrichWithStoredDevice(device)
         val appContext = context?.applicationContext
-            ?: return@withContext DlnaPlayResult(false, "Context unavailable for local media streaming")
+            ?: return@withContext DlnaPlayResult(false, "Context unavailable for local media streaming", suggestSystemCast = false)
 
         val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         val localIp = getLocalWifiIpv4Address(wifiManager)?.hostAddress
-            ?: return@withContext DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila")
+            ?: return@withContext DlnaPlayResult(false, "Wi-Fi IPv4 address nahi mila", suggestSystemCast = false)
 
         val resolvedMime = appContext.contentResolver.getType(uri)
             ?: guessMimeTypeFromUri(uri, mimeType)
@@ -955,7 +940,7 @@ class DlnaController(
             contentLength = fileSize
         )
         val port = server.startServer()
-            ?: return@withContext DlnaPlayResult(false, "Local HTTP relay server start nahi ho saka")
+            ?: return@withContext DlnaPlayResult(false, "Local HTTP relay server start nahi ho saka", suggestSystemCast = false)
 
         localMediaServer = server
         val streamUrl = "http://$localIp:$port/media"
@@ -973,7 +958,7 @@ class DlnaController(
                 localMediaServer = null
             }
         }
-        result
+        result.copy(suggestSystemCast = false)
     }
 
     fun releaseLocalMediaServer() {
@@ -992,16 +977,16 @@ class DlnaController(
         val resolvedDevice = enrichWithStoredDevice(device)
         val controlUrl = resolvedDevice.controlUrl.trim()
         if (controlUrl.isBlank() || !isValidHttpUrl(controlUrl)) {
-            return@withContext DlnaPlayResult(false, "Is device par DLNA AVTransport control URL nahi mila")
+            return@withContext DlnaPlayResult(false, "Is device par DLNA AVTransport control URL nahi mila", suggestSystemCast = false)
         }
 
         val cleanUrl = mediaUrl.trim()
         if (cleanUrl.isEmpty() || !isValidHttpUrl(cleanUrl)) {
-            return@withContext DlnaPlayResult(false, "Sirf HTTP/HTTPS stream URL supported hai")
+            return@withContext DlnaPlayResult(false, "Sirf HTTP/HTTPS stream URL supported hai", suggestSystemCast = false)
         }
 
         if (isLoopbackOrLocalhost(cleanUrl)) {
-            return@withContext DlnaPlayResult(false, "Loopback URL TV se reachable nahi hai")
+            return@withContext DlnaPlayResult(false, "Loopback URL TV se reachable nahi hai", suggestSystemCast = false)
         }
 
         val serviceUrn = resolvedDevice.serviceType.trim().ifBlank {
@@ -1073,7 +1058,7 @@ class DlnaController(
 
         if (!setUriRes.success) {
             Log.w(TAG, "SetAVTransportURI failed on $controlUrl: ${setUriRes.message}")
-            return DlnaPlayResult(false, "SetURI fail: ${setUriRes.message}")
+            return DlnaPlayResult(false, "SetURI fail: ${setUriRes.message}", suggestSystemCast = false)
         }
 
         delay(350)
@@ -1089,11 +1074,11 @@ class DlnaController(
             return DlnaPlayResult(
                 false,
                 "Renderer stream decode/play nahi kar paya ($transportState)",
-                suggestSystemCast = true
+                suggestSystemCast = false
             )
         }
 
-        return DlnaPlayResult(true, "Playing")
+        return DlnaPlayResult(true, "Playing", suggestSystemCast = false)
     }
 
     private fun sendStopAction(controlUrl: String, serviceUrn: String) {
@@ -1134,9 +1119,9 @@ class DlnaController(
         )
         return if (!playRes.success) {
             Log.w(TAG, "Play action failed on $controlUrl: ${playRes.message}")
-            DlnaPlayResult(false, "Play fail: ${playRes.message}")
+            DlnaPlayResult(false, "Play fail: ${playRes.message}", suggestSystemCast = false)
         } else {
-            DlnaPlayResult(true, "Playing")
+            DlnaPlayResult(true, "Playing", suggestSystemCast = false)
         }
     }
 
@@ -1423,15 +1408,15 @@ class DlnaController(
                         upnpDesc?.takeIf { it.isNotEmpty() }
                     ).joinToString(" - ")
                     Log.w(TAG, "SOAP error [$soapAction] on $controlUrl -> $detail")
-                    return DlnaPlayResult(false, detail)
+                    return DlnaPlayResult(false, detail, suggestSystemCast = false)
                 }
-                DlnaPlayResult(true, "OK")
+                DlnaPlayResult(true, "OK", suggestSystemCast = false)
             } finally {
                 connection?.disconnect()
             }
         }.getOrElse { e ->
             Log.w(TAG, "SOAP network exception [$soapAction] on $controlUrl: ${e.message}")
-            DlnaPlayResult(false, e.message ?: "Network error")
+            DlnaPlayResult(false, e.message ?: "Network error", suggestSystemCast = false)
         }
     }
 
