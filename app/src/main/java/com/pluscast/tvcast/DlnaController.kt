@@ -7,6 +7,9 @@ import android.net.wifi.WifiManager
 import android.provider.OpenableColumns
 import android.util.Log
 import android.webkit.CookieManager
+import androidx.mediarouter.media.MediaControlIntent
+import androidx.mediarouter.media.MediaRouteSelector
+import androidx.mediarouter.media.MediaRouter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -33,20 +36,32 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
+enum class CastProtocol {
+    DIAL,
+    ROKU_ECP,
+    DLNA_UPNP,
+    MEDIA_ROUTER
+}
+
 data class DlnaDevice(
     val friendlyName: String,
     val controlUrl: String = "",
     val serviceType: String = "urn:schemas-upnp-org:service:AVTransport:1",
     val dialAppUrl: String = "",
-    val hostIp: String = ""
+    val hostIp: String = "",
+    val mediaRouteId: String = "",
+    val isRoku: Boolean = false
 ) {
     val supportsDlna: Boolean get() = controlUrl.isNotBlank()
     val supportsDial: Boolean get() = dialAppUrl.isNotBlank() || hostIp.isNotBlank()
+    val supportsRoku: Boolean get() = isRoku || dialAppUrl.contains(":8060", ignoreCase = true)
+    val supportsMediaRouter: Boolean get() = mediaRouteId.isNotBlank()
 }
 
 data class DlnaPlayResult(
     val success: Boolean,
     val message: String,
+    val protocolUsed: CastProtocol? = null,
     val suggestSystemCast: Boolean = false
 )
 
@@ -96,7 +111,6 @@ class YouTubeStreamSniffer {
             ?: existing?.videoId
             ?: "unknown"
 
-        // Agar pehle se usi video ke liye MP4 stream mil chuki hai, to non-MP4 se overwrite na karein
         if (existing != null &&
             existing.videoId == videoId &&
             existing.mimeType == "video/mp4" &&
@@ -182,13 +196,22 @@ object DlnaDeviceStore {
     private const val KEY_SERVICE_TYPE = "last_service_type"
     private const val KEY_DIAL_APP_URL = "last_dial_app_url"
     private const val KEY_HOST_IP = "last_host_ip"
+    private const val KEY_MEDIA_ROUTE_ID = "last_media_route_id"
+    private const val KEY_IS_ROKU = "last_is_roku"
 
     fun saveLastDevice(context: Context, device: DlnaDevice) {
         val safeName = device.friendlyName.trim()
         val safeControlUrl = device.controlUrl.trim()
         val safeDialUrl = device.dialAppUrl.trim()
         val safeHostIp = device.hostIp.trim()
-        if (safeName.isEmpty() || (!isValidHttpUrl(safeControlUrl) && !isValidHttpUrl(safeDialUrl) && safeHostIp.isEmpty())) {
+        val safeRouteId = device.mediaRouteId.trim()
+        if (safeName.isEmpty() || (
+                !isValidHttpUrl(safeControlUrl) &&
+                    !isValidHttpUrl(safeDialUrl) &&
+                    safeHostIp.isEmpty() &&
+                    safeRouteId.isEmpty()
+                )
+        ) {
             return
         }
 
@@ -203,6 +226,8 @@ object DlnaDeviceStore {
             )
             .putString(KEY_DIAL_APP_URL, safeDialUrl)
             .putString(KEY_HOST_IP, safeHostIp)
+            .putString(KEY_MEDIA_ROUTE_ID, safeRouteId)
+            .putBoolean(KEY_IS_ROKU, device.supportsRoku)
             .apply()
     }
 
@@ -213,8 +238,16 @@ object DlnaDeviceStore {
         val controlUrl = prefs.getString(KEY_CONTROL_URL, null)?.trim().orEmpty()
         val dialAppUrl = prefs.getString(KEY_DIAL_APP_URL, null)?.trim().orEmpty()
         val hostIp = prefs.getString(KEY_HOST_IP, null)?.trim().orEmpty()
+        val routeId = prefs.getString(KEY_MEDIA_ROUTE_ID, null)?.trim().orEmpty()
+        val isRoku = prefs.getBoolean(KEY_IS_ROKU, false)
 
-        if (name.isEmpty() || (!isValidHttpUrl(controlUrl) && !isValidHttpUrl(dialAppUrl) && hostIp.isEmpty())) {
+        if (name.isEmpty() || (
+                !isValidHttpUrl(controlUrl) &&
+                    !isValidHttpUrl(dialAppUrl) &&
+                    hostIp.isEmpty() &&
+                    routeId.isEmpty()
+                )
+        ) {
             return null
         }
 
@@ -227,7 +260,9 @@ object DlnaDeviceStore {
             controlUrl = controlUrl,
             serviceType = serviceType,
             dialAppUrl = dialAppUrl,
-            hostIp = hostIp
+            hostIp = hostIp,
+            mediaRouteId = routeId,
+            isRoku = isRoku
         )
     }
 
@@ -254,6 +289,7 @@ class DlnaController(
         private const val USER_AGENT = "PlusCast/1.0 (UPnP/1.0; Android)"
         private const val SSDP_GROUP = "239.255.255.250"
         private const val SSDP_PORT = 1900
+        private const val ROKU_YOUTUBE_APP_ID = "837"
         private val YT_ID_REGEX = Regex("^[a-zA-Z0-9_-]{11}$")
     }
 
@@ -291,6 +327,7 @@ class DlnaController(
             val searchTargets = listOf(
                 "urn:dial-multiscreen-org:service:dial:1",
                 "urn:dial-multiscreen-org:device:dial:1",
+                "roku:ecp",
                 "urn:schemas-upnp-org:device:MediaRenderer:1",
                 "urn:schemas-upnp-org:service:AVTransport:1",
                 "urn:schemas-upnp-org:service:AVTransport:2",
@@ -423,12 +460,50 @@ class DlnaController(
                         controlUrl = existing.controlUrl.ifBlank { parsed.controlUrl },
                         serviceType = if (existing.controlUrl.isNotBlank()) existing.serviceType else parsed.serviceType,
                         dialAppUrl = existing.dialAppUrl.ifBlank { parsed.dialAppUrl },
-                        hostIp = existing.hostIp.ifBlank { parsed.hostIp }
+                        hostIp = existing.hostIp.ifBlank { parsed.hostIp },
+                        mediaRouteId = existing.mediaRouteId.ifBlank { parsed.mediaRouteId },
+                        isRoku = existing.isRoku || parsed.isRoku
                     )
                 }
             }
 
+            if (appContext != null) {
+                val routerDevices = discoverMediaRouterDevices(appContext)
+                for (rd in routerDevices) {
+                    val key = rd.hostIp.ifBlank { rd.friendlyName.lowercase(Locale.US) }
+                    val existing = foundByHost[key]
+                    if (existing == null) {
+                        foundByHost[key] = rd
+                    } else {
+                        foundByHost[key] = existing.copy(
+                            mediaRouteId = existing.mediaRouteId.ifBlank { rd.mediaRouteId }
+                        )
+                    }
+                }
+            }
+
             foundByHost.values.toList()
+        }
+
+    private suspend fun discoverMediaRouterDevices(appContext: Context): List<DlnaDevice> =
+        withContext(Dispatchers.Main) {
+            runCatching {
+                val mediaRouter = MediaRouter.getInstance(appContext)
+                val selector = MediaRouteSelector.Builder()
+                    .addControlCategory(MediaControlIntent.CATEGORY_REMOTE_PLAYBACK)
+                    .addControlCategory(MediaControlIntent.CATEGORY_LIVE_VIDEO)
+                    .build()
+                mediaRouter.routes
+                    .filter { !it.isDefault && it.matchesSelector(selector) && it.isEnabled }
+                    .map { route ->
+                        val ip = route.extras?.getString("ipAddress").orEmpty()
+                        DlnaDevice(
+                            friendlyName = route.name.orEmpty().ifBlank { "Cast Receiver" },
+                            hostIp = ip,
+                            mediaRouteId = route.id
+                        )
+                    }
+            }.getOrElse { emptyList() }
         }
 
     private fun enrichWithStoredDevice(device: DlnaDevice): DlnaDevice {
@@ -436,14 +511,17 @@ class DlnaController(
         val stored = DlnaDeviceStore.getLastDevice(appContext) ?: return device
         val sameDevice = stored.friendlyName.equals(device.friendlyName, ignoreCase = true) ||
             (stored.hostIp.isNotBlank() && stored.hostIp == device.hostIp) ||
-            (stored.controlUrl.isNotBlank() && stored.controlUrl == device.controlUrl)
+            (stored.controlUrl.isNotBlank() && stored.controlUrl == device.controlUrl) ||
+            (stored.mediaRouteId.isNotBlank() && stored.mediaRouteId == device.mediaRouteId)
         if (!sameDevice) return device
 
         return device.copy(
             controlUrl = device.controlUrl.ifBlank { stored.controlUrl },
             serviceType = if (device.controlUrl.isNotBlank()) device.serviceType else stored.serviceType,
             dialAppUrl = device.dialAppUrl.ifBlank { stored.dialAppUrl },
-            hostIp = device.hostIp.ifBlank { stored.hostIp }
+            hostIp = device.hostIp.ifBlank { stored.hostIp },
+            mediaRouteId = device.mediaRouteId.ifBlank { stored.mediaRouteId },
+            isRoku = device.isRoku || stored.isRoku
         )
     }
 
@@ -505,6 +583,18 @@ class DlnaController(
     ): DlnaPlayResult = withContext(Dispatchers.IO) {
         val resolvedDevice = enrichWithStoredDevice(device)
         val cleanUrl = mediaUrl.trim()
+
+        if (resolvedDevice.supportsRoku && isValidHttpUrl(cleanUrl) && !isLoopbackOrLocalhost(cleanUrl)) {
+            if (tryLaunchMediaViaRokuEcp(resolvedDevice, cleanUrl, title, resolveMimeType(cleanUrl, mimeType))) {
+                return@withContext DlnaPlayResult(
+                    success = true,
+                    message = "${resolvedDevice.friendlyName} (Roku) par stream play ho raha hai",
+                    protocolUsed = CastProtocol.ROKU_ECP,
+                    suggestSystemCast = false
+                )
+            }
+        }
+
         if (!isValidHttpUrl(cleanUrl) || isLoopbackOrLocalhost(cleanUrl)) {
             return@withContext playMediaOnDevice(
                 device = resolvedDevice,
@@ -521,7 +611,7 @@ class DlnaController(
             mimeType = mimeType
         )
         if (directResult.success) {
-            return@withContext directResult
+            return@withContext directResult.copy(protocolUsed = CastProtocol.DLNA_UPNP, suggestSystemCast = false)
         }
 
         Log.w(TAG, "Direct DLNA failed for $title (${directResult.message}), trying local HTTP relay")
@@ -535,7 +625,7 @@ class DlnaController(
             cookie = cookie
         )
         return@withContext if (proxyResult.success) {
-            proxyResult
+            proxyResult.copy(protocolUsed = CastProtocol.DLNA_UPNP, suggestSystemCast = false)
         } else {
             DlnaPlayResult(
                 success = false,
@@ -598,7 +688,7 @@ class DlnaController(
                 remoteStreamServer = null
             }
         }
-        return result.copy(suggestSystemCast = false)
+        return result.copy(protocolUsed = CastProtocol.DLNA_UPNP, suggestSystemCast = false)
     }
 
     suspend fun playYouTubeTubioStyle(
@@ -617,6 +707,18 @@ class DlnaController(
                 suggestSystemCast = false
             )
 
+        // 1. Roku ECP launch (agar Roku device hai)
+        if (resolvedDevice.supportsRoku && tryLaunchYouTubeViaRokuEcp(resolvedDevice, videoId)) {
+            delay(1200)
+            return@withContext DlnaPlayResult(
+                success = true,
+                message = "${resolvedDevice.friendlyName} (Roku) ke YouTube app mein video play ho raha hai",
+                protocolUsed = CastProtocol.ROKU_ECP,
+                suggestSystemCast = false
+            )
+        }
+
+        // 2. DIAL protocol (Smart TVs, Fire TV, Cast/DIAL receivers)
         val dialCandidates = resolveDialBaseUrls(resolvedDevice)
         Log.d(TAG, "YouTube -> DIAL check | videoId=$videoId | candidates=$dialCandidates")
 
@@ -626,14 +728,24 @@ class DlnaController(
                 return@withContext DlnaPlayResult(
                     success = true,
                     message = "${resolvedDevice.friendlyName} ke YouTube app mein video play ho raha hai",
+                    protocolUsed = CastProtocol.DIAL,
                     suggestSystemCast = false
                 )
             }
         }
 
-        // DIAL nahi mila: raw googlevideo DASH/unmuxed URLs ko DLNA AVTransport par bhejne se TV par
-        // black screen + 1-2s buffer ke baad wapas DLNA screen aati hai. Isliye DLNA fallback
-        // sirf tab try karein jab stream URL non-googlevideo ya clearly muxed progressive mp4/m3u8 lage.
+        // 3. MediaRouter route selection (agar receiver MediaRouter par registered hai; System Cast settings open nahi hongi)
+        val appContext = context?.applicationContext
+        if (appContext != null && trySelectMediaRouterDevice(appContext, resolvedDevice)) {
+            return@withContext DlnaPlayResult(
+                success = true,
+                message = "${resolvedDevice.friendlyName} receiver select ho gaya hai",
+                protocolUsed = CastProtocol.MEDIA_ROUTER,
+                suggestSystemCast = false
+            )
+        }
+
+        // 4. Safe DLNA fallback sirf non-googlevideo compatible stream ke liye (black screen / reset se bachne ke liye)
         val matchingStream = capturedStream?.takeIf {
             it.videoId == "unknown" || it.videoId == videoId
         }
@@ -658,6 +770,7 @@ class DlnaController(
                 return@withContext DlnaPlayResult(
                     success = true,
                     message = "${resolvedDevice.friendlyName} par YouTube stream play ho raha hai",
+                    protocolUsed = CastProtocol.DLNA_UPNP,
                     suggestSystemCast = false
                 )
             }
@@ -665,14 +778,85 @@ class DlnaController(
 
         return@withContext DlnaPlayResult(
             success = false,
-            message = "${resolvedDevice.friendlyName} par YouTube app launch nahi ho saka. TV par YouTube app khula rakhein ya same Wi-Fi par DIAL check karein.",
+            message = "${resolvedDevice.friendlyName} par YouTube launch nahi ho saka. TV par YouTube app open rakhein ya same Wi-Fi par receiver check karein.",
             suggestSystemCast = false
         )
     }
 
+    private suspend fun trySelectMediaRouterDevice(appContext: Context, device: DlnaDevice): Boolean =
+        withContext(Dispatchers.Main) {
+            runCatching {
+                val router = MediaRouter.getInstance(appContext)
+                val target = router.routes.firstOrNull { route ->
+                    !route.isDefault && (
+                        (device.mediaRouteId.isNotBlank() && route.id == device.mediaRouteId) ||
+                            route.name.equals(device.friendlyName, ignoreCase = true)
+                        )
+                } ?: return@runCatching false
+
+                router.selectRoute(target)
+                true
+            }.getOrElse { false }
+        }
+
+    private fun tryLaunchYouTubeViaRokuEcp(device: DlnaDevice, videoId: String): Boolean {
+        val host = resolveDeviceHost(device)
+        if (host.isBlank()) return false
+        val url = "http://$host:8060/launch/$ROKU_YOUTUBE_APP_ID?contentId=$videoId&mediaType=live"
+        return postSimpleRequest(url)
+    }
+
+    private fun tryLaunchMediaViaRokuEcp(
+        device: DlnaDevice,
+        mediaUrl: String,
+        title: String,
+        mimeType: String
+    ): Boolean {
+        val host = resolveDeviceHost(device)
+        if (host.isBlank()) return false
+        val encodedUrl = Uri.encode(mediaUrl)
+        val encodedTitle = Uri.encode(title)
+        val encodedFormat = Uri.encode(mimeType.substringAfter('/').ifBlank { "mp4" })
+        val url = "http://$host:8060/launch/15985?url=$encodedUrl&name=$encodedTitle&format=$encodedFormat"
+        return postSimpleRequest(url)
+    }
+
+    private fun postSimpleRequest(endpoint: String): Boolean {
+        return runCatching {
+            var connection: HttpURLConnection? = null
+            try {
+                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 2000
+                    readTimeout = 2000
+                    requestMethod = "POST"
+                    doOutput = true
+                    instanceFollowRedirects = false
+                    setRequestProperty("User-Agent", USER_AGENT)
+                    setRequestProperty("Content-Length", "0")
+                }
+                connection = conn
+                val code = conn.responseCode
+                Log.d(TAG, "POST $endpoint -> HTTP $code")
+                code in 200..204 || code == 302
+            } finally {
+                connection?.disconnect()
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun resolveDeviceHost(device: DlnaDevice): String {
+        if (device.hostIp.isNotBlank()) return device.hostIp.trim()
+        for (rawUrl in listOf(device.dialAppUrl, device.controlUrl)) {
+            if (rawUrl.isNotBlank()) {
+                val h = runCatching { URL(rawUrl).host }.getOrNull().orEmpty()
+                if (h.isNotBlank()) return h
+            }
+        }
+        return ""
+    }
+
     private fun isSafeForDlnaFallback(url: String): Boolean {
         val lower = url.lowercase(Locale.US)
-        // googlevideo videoplayback links aksar adaptive/DASH ya session-bound hote hain jo DLNA par STOP ho jaate hain
         if (lower.contains("googlevideo.com/videoplayback")) {
             return false
         }
@@ -755,7 +939,7 @@ class DlnaController(
             if (device.controlUrl.isNotBlank()) URL(device.controlUrl) else null
         }.getOrNull()
 
-        val host = device.hostIp.ifBlank { controlParsedUrl?.host.orEmpty() }
+        val host = resolveDeviceHost(device)
         val controlPort = controlParsedUrl?.port?.takeIf { it > 0 }
 
         if (controlParsedUrl != null && host.isNotBlank()) {
@@ -958,7 +1142,7 @@ class DlnaController(
                 localMediaServer = null
             }
         }
-        result.copy(suggestSystemCast = false)
+        result.copy(protocolUsed = CastProtocol.DLNA_UPNP, suggestSystemCast = false)
     }
 
     fun releaseLocalMediaServer() {
@@ -1078,7 +1262,7 @@ class DlnaController(
             )
         }
 
-        return DlnaPlayResult(true, "Playing", suggestSystemCast = false)
+        return DlnaPlayResult(true, "Playing", protocolUsed = CastProtocol.DLNA_UPNP, suggestSystemCast = false)
     }
 
     private fun sendStopAction(controlUrl: String, serviceUrn: String) {
@@ -1121,7 +1305,7 @@ class DlnaController(
             Log.w(TAG, "Play action failed on $controlUrl: ${playRes.message}")
             DlnaPlayResult(false, "Play fail: ${playRes.message}", suggestSystemCast = false)
         } else {
-            DlnaPlayResult(true, "Playing", suggestSystemCast = false)
+            DlnaPlayResult(true, "Playing", protocolUsed = CastProtocol.DLNA_UPNP, suggestSystemCast = false)
         }
     }
 
@@ -1334,6 +1518,10 @@ class DlnaController(
                     else -> ""
                 }
 
+                val isRokuDevice = xml.contains("roku", ignoreCase = true) ||
+                    friendlyName.contains("roku", ignoreCase = true) ||
+                    baseUrl.port == 8060
+
                 val hostIp = baseUrl.host.orEmpty()
                 if (!isValidHttpUrl(resolvedControlUrl) && !isValidHttpUrl(resolvedDialUrl) && hostIp.isBlank()) {
                     return null
@@ -1344,7 +1532,8 @@ class DlnaController(
                     controlUrl = resolvedControlUrl,
                     serviceType = serviceType ?: "urn:schemas-upnp-org:service:AVTransport:1",
                     dialAppUrl = resolvedDialUrl,
-                    hostIp = hostIp
+                    hostIp = hostIp,
+                    isRoku = isRokuDevice
                 )
             } finally {
                 connection?.disconnect()
