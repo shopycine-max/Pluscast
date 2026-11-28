@@ -21,6 +21,7 @@ import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -813,7 +814,7 @@ class MainActivity : AppCompatActivity() {
                     lastMsg = dlnaRes.message
                 } else if (!anySuccess) {
                     lastMsg = dlnaRes.message
-                    shouldOfferSystemCast = dlnaRes.suggestSystemCast
+                    shouldOfferSystemCast = true
                 }
             }
 
@@ -824,7 +825,7 @@ class MainActivity : AppCompatActivity() {
                     .setTitle("Cast Options")
                     .setMessage(lastMsg.ifBlank { "TV par YouTube auto-launch nahi hua." })
                     .setPositiveButton("Open Cast Settings") { _, _ ->
-                        dlnaController.openSystemCastSettings()
+                        openSystemCastSettings()
                     }
                     .setNegativeButton("Cancel", null)
                     .show()
@@ -836,6 +837,24 @@ class MainActivity : AppCompatActivity() {
                 ).show()
             }
         }
+    }
+
+    private fun openSystemCastSettings() {
+        val castIntent = Intent(Settings.ACTION_CAST_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val fallbackIntent = Intent(Settings.ACTION_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { startActivity(castIntent) }
+            .recoverCatching { startActivity(fallbackIntent) }
+            .onFailure {
+                Toast.makeText(
+                    this,
+                    "Cast settings open nahi ho saki",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
     }
 
     // ==================== IN-APP YOUTUBE BROWSER ====================
