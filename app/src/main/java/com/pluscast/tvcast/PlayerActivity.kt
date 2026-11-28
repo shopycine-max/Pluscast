@@ -1063,10 +1063,12 @@ class PlayerActivity : AppCompatActivity() {
                     )
                 }
                 else -> {
-                    dlnaController.playMediaOnDevice(
+                    dlnaController.playIptvOrRemoteStream(
                         device = device,
                         mediaUrl = mediaUrl,
-                        title = mediaTitle
+                        title = mediaTitle,
+                        userAgent = mediaUserAgent,
+                        referrer = mediaReferrer
                     )
                 }
             }
