@@ -91,19 +91,22 @@ class YouTubeStreamSniffer {
 
         val lower = url.lowercase(Locale.US)
         val isMp4 = lower.contains("mime=video%2fmp4") || lower.contains("mime=video/mp4")
+        val hasRangeParam = lower.contains("range=")
 
         val existing = latestStream
         val videoId = pageUrl?.let { extractVideoId(it) }
             ?: existing?.videoId
             ?: "unknown"
 
-        // Agar pehle se usi video ke liye MP4 stream mil chuki hai, to non-MP4 se overwrite na karein
+        // Agar pehle se usi video ke liye non-range MP4 stream mil chuki hai, to overwrite na karein
         if (existing != null &&
             existing.videoId == videoId &&
-            existing.mimeType == "video/mp4" &&
-            !isMp4
+            existing.mimeType == "video/mp4"
         ) {
-            return
+            val existingIsRange = existing.streamUrl.lowercase(Locale.US).contains("range=")
+            if (!isMp4 || (existingIsRange && hasRangeParam)) {
+                return
+            }
         }
 
         val cookie = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
@@ -568,7 +571,8 @@ class DlnaController(
         } else {
             DlnaPlayResult(
                 success = false,
-                message = "$title play nahi ho saka (${directResult.message} / ${proxyResult.message})"
+                message = "$title play nahi ho saka (${directResult.message} / ${proxyResult.message})",
+                suggestSystemCast = true
             )
         }
     }
@@ -602,7 +606,7 @@ class DlnaController(
         val server = RemoteStreamHttpServer(
             bindIp = localIp,
             remoteUrl = remoteUrl,
-            mimeType = mimeType.ifBlank { "application/x-mpegURL" },
+            mimeType = mimeType.ifBlank { "video/mp4" },
             userAgent = effectiveUa,
             referrer = effectiveRef,
             cookie = cookie.trim()
@@ -617,8 +621,8 @@ class DlnaController(
         val result = playMediaOnDevice(
             device = device,
             mediaUrl = proxyUrl,
-            title = title.trim().ifEmpty { "PlusCast IPTV" },
-            mimeType = mimeType.ifBlank { "application/x-mpegURL" }
+            title = title.trim().ifEmpty { "PlusCast Media" },
+            mimeType = mimeType.ifBlank { "video/mp4" }
         )
         if (!result.success) {
             server.stopServer()
@@ -686,7 +690,7 @@ class DlnaController(
             } else {
                 return@withContext DlnaPlayResult(
                     success = false,
-                    message = "${resolvedDevice.friendlyName} par YouTube stream play nahi ho saka (${proxyResult.message})",
+                    message = "${resolvedDevice.friendlyName} par DLNA stream decode nahi ho saka (TV black screen ke baad DLNA par wapas aaya). Screen Cast / YouTube app try karein.",
                     suggestSystemCast = true
                 )
             }
@@ -695,7 +699,7 @@ class DlnaController(
         return@withContext DlnaPlayResult(
             success = false,
             message = if (cleanStreamUrl.isBlank()) {
-                "${resolvedDevice.friendlyName} par YouTube stream/app play nahi ho saka. Video ko WebView mein play karke stream load hone dein."
+                "${resolvedDevice.friendlyName} par DIAL nahi mila aur YouTube stream capture nahi hua. Screen Cast try karein."
             } else {
                 "${resolvedDevice.friendlyName} par YouTube DIAL aur DLNA stream dono play nahi ho sake."
             },
@@ -1597,7 +1601,7 @@ class DlnaController(
                     try {
                         val conn = (URL(remoteUrl).openConnection() as HttpURLConnection).apply {
                             connectTimeout = 6000
-                            readTimeout = 10000
+                            readTimeout = 12000
                             requestMethod = if (method == "HEAD") "HEAD" else "GET"
                             instanceFollowRedirects = true
                             setRequestProperty("User-Agent", userAgent)
@@ -1652,18 +1656,22 @@ class DlnaController(
 
                         conn.inputStream?.use { input ->
                             val buffer = ByteArray(64 * 1024)
+                            var totalBytesSent = 0L
                             while (running.get()) {
                                 val read = input.read(buffer)
                                 if (read <= 0) break
                                 out.write(buffer, 0, read)
+                                totalBytesSent += read.toLong()
                             }
                             out.flush()
+                            Log.d(TAG, "Relay finished streaming $totalBytesSent bytes")
                         }
                     } finally {
                         upstream?.disconnect()
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w(TAG, "Relay client stream closed/error: ${e.message}")
             }
         }
 
