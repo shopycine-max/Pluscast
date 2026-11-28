@@ -142,7 +142,7 @@ class PlayerActivity : AppCompatActivity() {
     )
 
     private val hideControlsRunnable = Runnable {
-        if (!isScreenLocked) {
+        if (!isScreenLocked && !isYouTubeContent) {
             hideControlsCluster()
         }
     }
@@ -288,7 +288,7 @@ class PlayerActivity : AppCompatActivity() {
         return null
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
+    @SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
     private fun initYouTubeWebPlayer(watchUrl: String) {
         playerView?.visibility = View.GONE
         btnYtApp?.visibility = View.VISIBLE
@@ -308,7 +308,38 @@ class PlayerActivity : AppCompatActivity() {
                 userAgentString = effectiveUa
             }
 
+            wv.setOnTouchListener { _, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN ||
+                    event.actionMasked == MotionEvent.ACTION_MOVE
+                ) {
+                    if (!isScreenLocked) {
+                        controlsClusterView?.animate()?.cancel()
+                        controlsClusterView?.visibility = View.VISIBLE
+                        controlsClusterView?.alpha = 1f
+                    }
+                }
+                false
+            }
+
+            wv.setOnScrollChangeListener { _, _, _, _, _ ->
+                if (!isScreenLocked) {
+                    controlsClusterView?.animate()?.cancel()
+                    controlsClusterView?.visibility = View.VISIBLE
+                    controlsClusterView?.alpha = 1f
+                }
+            }
+
             wv.webViewClient = object : WebViewClient() {
+                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                    super.doUpdateVisitedHistory(view, url, isReload)
+                    val updatedId = url?.let(::extractYouTubeId).orEmpty()
+                    if (updatedId.isNotEmpty() && updatedId != youtubeVideoId) {
+                        youtubeVideoId = updatedId
+                        youtubeUrl = "https://m.youtube.com/watch?v=$updatedId"
+                        capturedStreamUrl = ""
+                    }
+                }
+
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                     val targetUri = request?.url ?: return false
                     val scheme = targetUri.scheme?.lowercase(Locale.US).orEmpty()
@@ -386,9 +417,12 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun openCurrentYouTubeInApp() {
         scheduleAutoHide()
-        val id = youtubeVideoId.ifEmpty { extractYouTubeId(youtubeUrl).orEmpty() }
+        val currentWvUrl = youtubeWebView?.url.orEmpty()
+        val id = extractYouTubeId(currentWvUrl)
+            ?: youtubeVideoId.ifEmpty { extractYouTubeId(youtubeUrl).orEmpty() }
         val target = when {
             id.isNotEmpty() -> Uri.parse("https://www.youtube.com/watch?v=$id")
+            isValidHttpUrl(currentWvUrl) -> Uri.parse(currentWvUrl)
             youtubeUrl.isNotEmpty() -> Uri.parse(youtubeUrl)
             else -> null
         } ?: run {
@@ -414,6 +448,11 @@ class PlayerActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         syncOrientationControls(newConfig.orientation)
+        if (!isScreenLocked) {
+            controlsClusterView?.visibility = View.VISIBLE
+            controlsClusterView?.alpha = 1f
+            scheduleAutoHide()
+        }
     }
 
     override fun onStart() {
@@ -497,13 +536,14 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun hideControlsCluster() {
+        if (isYouTubeContent || isScreenLocked) return
         controlsClusterView?.let { cluster ->
             cluster.animate().cancel()
             cluster.animate()
                 .alpha(0f)
                 .setDuration(150L)
                 .withEndAction {
-                    if (!isScreenLocked) {
+                    if (!isScreenLocked && !isYouTubeContent) {
                         cluster.visibility = View.GONE
                     }
                 }
@@ -513,7 +553,7 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun scheduleAutoHide() {
         autoHideHandler.removeCallbacks(hideControlsRunnable)
-        if (!isScreenLocked) {
+        if (!isScreenLocked && !isYouTubeContent) {
             autoHideHandler.postDelayed(hideControlsRunnable, AUTO_HIDE_DELAY_MS)
         }
     }
@@ -977,20 +1017,6 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun DlnaController.playCapturedYouTubeStream(
-        device: DlnaDevice,
-        streamUrl: String,
-        title: String,
-        mimeType: String = "video/mp4"
-    ): DlnaPlayResult {
-        return playMediaOnDevice(
-            device = device,
-            mediaUrl = streamUrl,
-            title = title,
-            mimeType = mimeType
-        )
-    }
-
     private fun castStreamToDevice(device: DlnaDevice) {
         Toast.makeText(
             this,
@@ -1000,34 +1026,32 @@ class PlayerActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val res = when {
                 isYouTubeContent -> {
-                    val streamCandidate = capturedStreamUrl
-                    if (isValidHttpUrl(streamCandidate)) {
-                        val proxyRes = dlnaController.playCapturedYouTubeStream(
-                            device = device,
-                            streamUrl = streamCandidate,
-                            title = mediaTitle,
-                            mimeType = capturedStreamMime
-                        )
-                        if (proxyRes.success) {
-                            proxyRes
-                        } else {
-                            val ytTarget = youtubeUrl.ifEmpty {
-                                if (youtubeVideoId.isNotEmpty()) youtubeVideoId else mediaUrl
-                            }
-                            dlnaController.playYouTubeOnDevice(
-                                device = device,
-                                youtubeUrlOrId = ytTarget
-                            )
-                        }
-                    } else {
-                        val ytTarget = youtubeUrl.ifEmpty {
+                    val activeUrl = youtubeWebView?.url.orEmpty()
+                    val ytTarget = activeUrl.takeIf(::isValidHttpUrl)
+                        ?: youtubeUrl.ifEmpty {
                             if (youtubeVideoId.isNotEmpty()) youtubeVideoId else mediaUrl
                         }
-                        dlnaController.playYouTubeOnDevice(
-                            device = device,
-                            youtubeUrlOrId = ytTarget
+                    val streamCandidate = capturedStreamUrl.takeIf(::isValidHttpUrl)
+                    val capturedPayload = streamCandidate?.let { streamUrl ->
+                        val activeVideoId = extractYouTubeId(ytTarget)
+                            ?: youtubeVideoId.ifEmpty { "unknown" }
+                        CapturedYouTubeStream(
+                            videoId = activeVideoId,
+                            streamUrl = streamUrl,
+                            title = youtubeWebView?.title?.trim()?.takeIf { it.isNotEmpty() } ?: mediaTitle,
+                            mimeType = capturedStreamMime,
+                            userAgent = capturedStreamUa,
+                            referrer = capturedStreamRef,
+                            cookie = capturedStreamCookie
                         )
                     }
+                    dlnaController.playYouTubeTubioStyle(
+                        device = device,
+                        youtubeUrlOrId = ytTarget,
+                        capturedStream = capturedPayload,
+                        fallbackTitle = mediaTitle,
+                        fallbackMimeType = capturedStreamMime
+                    )
                 }
                 castMode == CAST_MODE_LOCAL -> {
                     val targetUri = Uri.parse(localMediaUri.ifEmpty { mediaUrl })
