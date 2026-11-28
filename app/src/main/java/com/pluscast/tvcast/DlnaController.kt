@@ -273,6 +273,34 @@ class DlnaController(
     @Volatile
     private var remoteStreamServer: RemoteStreamHttpServer? = null
 
+    suspend fun dumpDeviceDiagnostics(device: DlnaDevice, sampleVideoId: String = "dQw4w9WgXcQ") =
+        withContext(Dispatchers.IO) {
+            val resolved = enrichWithStoredDevice(device)
+            val dialUrls = resolveDialBaseUrls(resolved)
+            val transportState = if (resolved.controlUrl.isNotBlank()) {
+                queryTransportState(resolved.controlUrl, resolved.serviceType)
+            } else {
+                "NO_CONTROL_URL"
+            }
+            Log.d(
+                TAG,
+                """
+                === STB DIAGNOSTIC ===
+                Name: ${resolved.friendlyName}
+                HostIP: ${resolved.hostIp}
+                ControlURL: ${resolved.controlUrl}
+                ServiceType: ${resolved.serviceType}
+                DialAppURL: ${resolved.dialAppUrl}
+                TransportState: $transportState
+                DialCandidates: $dialUrls
+                RemoteRelay: ${if (remoteStreamServer != null) "ACTIVE" else "NONE"}
+                LocalRelay: ${if (localMediaServer != null) "ACTIVE" else "NONE"}
+                SampleVideoId: $sampleVideoId
+                ======================
+                """.trimIndent()
+            )
+        }
+
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
         withContext(Dispatchers.IO) {
             val foundByHost = linkedMapOf<String, DlnaDevice>()
@@ -617,6 +645,8 @@ class DlnaController(
                 suggestSystemCast = false
             )
 
+        dumpDeviceDiagnostics(resolvedDevice, videoId)
+
         val dialCandidates = resolveDialBaseUrls(resolvedDevice)
         Log.d(TAG, "Tubio-style YouTube -> DIAL check | device=${resolvedDevice.friendlyName} | videoId=$videoId | candidates=$dialCandidates")
 
@@ -834,12 +864,14 @@ class DlnaController(
 
                 val headerUrl = conn.getHeaderField("Application-URL")?.trim()
                 if (!headerUrl.isNullOrBlank() && isValidHttpUrl(headerUrl)) {
+                    Log.d(TAG, "DIAL Application-URL header from $descUrl -> $headerUrl")
                     return headerUrl
                 }
 
                 val xml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
                 val xmlAppUrl = extractTagValue(xml, "applicationURL")?.trim()
                 if (!xmlAppUrl.isNullOrBlank() && isValidHttpUrl(xmlAppUrl)) {
+                    Log.d(TAG, "DIAL applicationURL XML from $descUrl -> $xmlAppUrl")
                     return xmlAppUrl
                 }
                 null
@@ -868,6 +900,7 @@ class DlnaController(
 
         for (endpoint in appEndpoints) {
             val probeCode = probeDialAppStatus(endpoint)
+            Log.d(TAG, "DIAL GET probe $endpoint -> HTTP $probeCode")
             if (probeCode == 404) continue
 
             for ((payload, contentType) in payloads) {
@@ -1063,6 +1096,7 @@ class DlnaController(
 
         var setUriRes = DlnaPlayResult(false, "SetURI fail")
         for (proto in protocolCandidates) {
+            Log.d(TAG, "Trying SetAVTransportURI with protocolInfo=$proto on $controlUrl")
             setUriRes = sendSoapAction(
                 controlUrl = controlUrl,
                 soapAction = "\"$serviceUrn#SetAVTransportURI\"",
