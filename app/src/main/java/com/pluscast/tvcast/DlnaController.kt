@@ -5,7 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.provider.OpenableColumns
-import android.provider.Settings
 import android.util.Log
 import android.webkit.CookieManager
 import kotlinx.coroutines.Dispatchers
@@ -47,8 +46,7 @@ data class DlnaDevice(
 
 data class DlnaPlayResult(
     val success: Boolean,
-    val message: String,
-    val suggestSystemCast: Boolean = false
+    val message: String
 )
 
 data class CapturedYouTubeStream(
@@ -91,18 +89,30 @@ class YouTubeStreamSniffer {
 
         val lower = url.lowercase(Locale.US)
         val isMp4 = lower.contains("mime=video%2fmp4") || lower.contains("mime=video/mp4")
+        val isProgressiveMp4 = isMp4 && (
+            lower.contains("itag=18") ||
+                lower.contains("itag=22") ||
+                lower.contains("itag=37") ||
+                lower.contains("itag=38")
+            )
 
         val existing = latestStream
         val videoId = pageUrl?.let { extractVideoId(it) }
             ?: existing?.videoId
             ?: "unknown"
 
-        if (existing != null &&
-            existing.videoId == videoId &&
-            existing.mimeType == "video/mp4" &&
-            !isMp4
-        ) {
-            return
+        if (existing != null && existing.videoId == videoId) {
+            val existingLower = existing.streamUrl.lowercase(Locale.US)
+            val existingIsProgressive = existingLower.contains("itag=18") ||
+                existingLower.contains("itag=22") ||
+                existingLower.contains("itag=37") ||
+                existingLower.contains("itag=38")
+            if (existingIsProgressive && !isProgressiveMp4) {
+                return
+            }
+            if (existing.mimeType == "video/mp4" && !isMp4 && !isProgressiveMp4) {
+                return
+            }
         }
 
         val cookie = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
@@ -602,8 +612,7 @@ class DlnaController(
             ?: capturedStream?.videoId?.takeIf { it.matches(YT_ID_REGEX) }
             ?: return@withContext DlnaPlayResult(
                 success = false,
-                message = "Pehle koi YouTube video open karein (video link/ID nahi mila)",
-                suggestSystemCast = false
+                message = "Pehle koi YouTube video open karein (video link/ID nahi mila)"
             )
 
         val dialCandidates = resolveDialBaseUrls(resolvedDevice)
@@ -613,8 +622,7 @@ class DlnaController(
             if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
                 return@withContext DlnaPlayResult(
                     success = true,
-                    message = "${resolvedDevice.friendlyName} ke YouTube app mein video play ho raha hai",
-                    suggestSystemCast = false
+                    message = "${resolvedDevice.friendlyName} ke YouTube app mein video play ho raha hai"
                 )
             }
         }
@@ -636,17 +644,15 @@ class DlnaController(
                 cookie = matchingStream?.cookie.orEmpty(),
                 mimeType = matchingStream?.mimeType?.ifBlank { fallbackMimeType } ?: fallbackMimeType
             )
-            if (proxyResult.success) {
-                return@withContext DlnaPlayResult(
+            return@withContext if (proxyResult.success) {
+                DlnaPlayResult(
                     success = true,
-                    message = "${resolvedDevice.friendlyName} par YouTube stream play ho raha hai",
-                    suggestSystemCast = false
+                    message = "${resolvedDevice.friendlyName} par YouTube stream play ho raha hai"
                 )
             } else {
-                return@withContext DlnaPlayResult(
+                DlnaPlayResult(
                     success = false,
-                    message = "${resolvedDevice.friendlyName} par YouTube play nahi ho saka (DIAL band hai aur DLNA stream ${proxyResult.message} hai)",
-                    suggestSystemCast = true
+                    message = "${resolvedDevice.friendlyName} par YouTube play nahi ho saka (${proxyResult.message})"
                 )
             }
         }
@@ -654,11 +660,10 @@ class DlnaController(
         return@withContext DlnaPlayResult(
             success = false,
             message = if (cleanStreamUrl.isBlank()) {
-                "${resolvedDevice.friendlyName} par YouTube DIAL nahi mila aur stream URL bhi capture nahi hua. Video play karke dekhein ya Cast/Mirroring use karein."
+                "${resolvedDevice.friendlyName} par YouTube DIAL nahi mila aur stream URL bhi capture nahi hua. Video play karke dekhein."
             } else {
                 "${resolvedDevice.friendlyName} par YouTube DIAL aur DLNA stream dono play nahi ho sake."
-            },
-            suggestSystemCast = true
+            }
         )
     }
 
@@ -715,27 +720,6 @@ class DlnaController(
             true
         } catch (_: Exception) {
             false
-        }
-    }
-
-    fun openSystemCastSettings(): Boolean {
-        val appContext = context?.applicationContext ?: return false
-        return try {
-            val intent = Intent(Settings.ACTION_CAST_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            appContext.startActivity(intent)
-            true
-        } catch (_: Exception) {
-            try {
-                val fallback = Intent(Settings.ACTION_DISPLAY_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                appContext.startActivity(fallback)
-                true
-            } catch (_: Exception) {
-                false
-            }
         }
     }
 
@@ -1526,7 +1510,7 @@ class DlnaController(
         private fun handleClient(socket: Socket) {
             try {
                 socket.use { client ->
-                    client.soTimeout = 20000
+                    client.soTimeout = 25000
                     val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
                     val requestLine = reader.readLine() ?: return
                     val parts = requestLine.split(" ")
@@ -1598,14 +1582,14 @@ class DlnaController(
                             append("Connection: close\r\n\r\n")
                         }
 
-                        val out = BufferedOutputStream(client.getOutputStream(), 64 * 1024)
+                        val out = BufferedOutputStream(client.getOutputStream(), 128 * 1024)
                         out.write(headerBuilder.toString().toByteArray(Charsets.ISO_8859_1))
                         out.flush()
 
                         if (method == "HEAD") return
 
                         conn.inputStream?.use { input ->
-                            val buffer = ByteArray(64 * 1024)
+                            val buffer = ByteArray(128 * 1024)
                             var timeoutRetries = 0
                             while (running.get()) {
                                 try {
@@ -1615,7 +1599,7 @@ class DlnaController(
                                     out.write(buffer, 0, read)
                                 } catch (_: SocketTimeoutException) {
                                     timeoutRetries++
-                                    if (timeoutRetries >= 3) break
+                                    if (timeoutRetries >= 4) break
                                 }
                             }
                             out.flush()
