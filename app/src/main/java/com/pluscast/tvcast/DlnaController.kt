@@ -97,7 +97,6 @@ class YouTubeStreamSniffer {
             ?: existing?.videoId
             ?: "unknown"
 
-        // Agar pehle se usi video ke liye MP4 stream mil chuki hai, to non-MP4 se overwrite na karein
         if (existing != null &&
             existing.videoId == videoId &&
             existing.mimeType == "video/mp4" &&
@@ -865,8 +864,8 @@ class DlnaController(
                     var connection: HttpURLConnection? = null
                     try {
                         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 2200
-                            readTimeout = 2200
+                            connectTimeout = 2500
+                            readTimeout = 2500
                             requestMethod = "POST"
                             doOutput = true
                             instanceFollowRedirects = false
