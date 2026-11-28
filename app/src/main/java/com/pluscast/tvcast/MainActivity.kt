@@ -773,6 +773,7 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             var anySuccess = false
+            var shouldOfferSystemCast = false
             var lastMsg = ""
 
             if (activeCast != null && effectiveStream != null && effectiveStream.streamUrl.isNotBlank()) {
@@ -812,16 +813,28 @@ class MainActivity : AppCompatActivity() {
                     lastMsg = dlnaRes.message
                 } else if (!anySuccess) {
                     lastMsg = dlnaRes.message
+                    shouldOfferSystemCast = dlnaRes.suggestSystemCast
                 }
             }
 
             if (isFinishing || isDestroyed) return@launch
 
-            Toast.makeText(
-                this@MainActivity,
-                lastMsg.ifBlank { "Cast bhej nahi paye" },
-                Toast.LENGTH_LONG
-            ).show()
+            if (!anySuccess && shouldOfferSystemCast) {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Cast Options")
+                    .setMessage(lastMsg.ifBlank { "TV par YouTube auto-launch nahi hua." })
+                    .setPositiveButton("Open Cast Settings") { _, _ ->
+                        dlnaController.openSystemCastSettings()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            } else {
+                Toast.makeText(
+                    this@MainActivity,
+                    lastMsg.ifBlank { "Cast bhej nahi paye" },
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
     }
 
