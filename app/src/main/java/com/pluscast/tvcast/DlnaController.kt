@@ -1,3 +1,243 @@
+package com.pluscast.tvcast
+
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.net.wifi.WifiManager
+import android.provider.OpenableColumns
+import android.provider.Settings
+import android.util.Log
+import android.webkit.CookieManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import java.io.BufferedOutputStream
+import java.io.BufferedReader
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.MulticastSocket
+import java.net.NetworkInterface
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketTimeoutException
+import java.net.URL
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+
+data class DlnaDevice(
+    val friendlyName: String,
+    val controlUrl: String = "",
+    val serviceType: String = "urn:schemas-upnp-org:service:AVTransport:1",
+    val dialAppUrl: String = "",
+    val hostIp: String = ""
+) {
+    val supportsDlna: Boolean get() = controlUrl.isNotBlank()
+    val supportsDial: Boolean get() = dialAppUrl.isNotBlank() || hostIp.isNotBlank()
+}
+
+data class DlnaPlayResult(
+    val success: Boolean,
+    val message: String,
+    val suggestSystemCast: Boolean = false
+)
+
+data class CapturedYouTubeStream(
+    val videoId: String,
+    val streamUrl: String,
+    val title: String,
+    val mimeType: String,
+    val userAgent: String,
+    val referrer: String,
+    val cookie: String
+)
+
+class YouTubeStreamSniffer {
+
+    @Volatile
+    var latestStream: CapturedYouTubeStream? = null
+        private set
+
+    fun onPageTitleUpdated(currentUrl: String?, title: String?) {
+        val current = latestStream ?: return
+        val vid = currentUrl?.let { extractVideoId(it) }
+        if (vid != null && vid == current.videoId && !title.isNullOrBlank()) {
+            latestStream = current.copy(title = title.trim())
+        }
+    }
+
+    fun inspectRequest(
+        pageUrl: String?,
+        requestUrl: String?,
+        headers: Map<String, String>?,
+        currentTitle: String?
+    ) {
+        val url = requestUrl?.trim().orEmpty()
+        if (!url.startsWith("http://", ignoreCase = true) &&
+            !url.startsWith("https://", ignoreCase = true)
+        ) {
+            return
+        }
+        if (!isPlayableYouTubeMediaUrl(url)) return
+
+        val lower = url.lowercase(Locale.US)
+        val isMp4 = lower.contains("mime=video%2fmp4") || lower.contains("mime=video/mp4")
+
+        val existing = latestStream
+        val videoId = pageUrl?.let { extractVideoId(it) }
+            ?: existing?.videoId
+            ?: "unknown"
+
+        if (existing != null &&
+            existing.videoId == videoId &&
+            existing.mimeType == "video/mp4" &&
+            !isMp4
+        ) {
+            return
+        }
+
+        val cookie = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
+        val ua = headers?.entries?.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+            ?: "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        val ref = headers?.entries?.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
+            ?: pageUrl?.takeIf { it.isNotBlank() }
+            ?: "https://m.youtube.com/"
+
+        val mime = when {
+            isMp4 -> "video/mp4"
+            lower.contains("mime=video%2fwebm") || lower.contains("mime=video/webm") -> "video/webm"
+            lower.contains(".m3u8") -> "application/x-mpegURL"
+            else -> "video/mp4"
+        }
+
+        latestStream = CapturedYouTubeStream(
+            videoId = videoId,
+            streamUrl = url,
+            title = currentTitle?.trim()?.takeIf { it.isNotEmpty() } ?: "YouTube Video ($videoId)",
+            mimeType = mime,
+            userAgent = ua,
+            referrer = ref,
+            cookie = cookie
+        )
+    }
+
+    fun clear() {
+        latestStream = null
+    }
+
+    private fun isPlayableYouTubeMediaUrl(url: String): Boolean {
+        val lower = url.lowercase(Locale.US)
+        if (!lower.contains("googlevideo.com/videoplayback")) return false
+        val isAudioOnly = lower.contains("mime=audio%2f") || lower.contains("mime=audio/")
+        return !isAudioOnly
+    }
+
+    private fun extractVideoId(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return trimmed
+        val uri = runCatching { Uri.parse(trimmed) }.getOrNull() ?: return null
+        val host = uri.host?.lowercase(Locale.US).orEmpty()
+
+        if (host.contains("youtu.be")) {
+            val seg = uri.lastPathSegment?.trim().orEmpty()
+            if (seg.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return seg
+        }
+
+        uri.getQueryParameter("v")?.trim()
+            ?.takeIf { it.matches(Regex("^[a-zA-Z0-9_-]{11}$")) }
+            ?.let { return it }
+
+        val segs = uri.pathSegments.orEmpty()
+        for (i in 0 until segs.size - 1) {
+            if (segs[i].lowercase(Locale.US) in setOf("shorts", "embed", "live", "v")) {
+                val cand = segs[i + 1].trim()
+                if (cand.matches(Regex("^[a-zA-Z0-9_-]{11}$"))) return cand
+            }
+        }
+        return null
+    }
+}
+
+object DlnaDeviceStore {
+
+    private const val PREFS_NAME = "pluscast_dlna_prefs"
+    private const val KEY_NAME = "last_friendly_name"
+    private const val KEY_CONTROL_URL = "last_control_url"
+    private const val KEY_SERVICE_TYPE = "last_service_type"
+    private const val KEY_DIAL_APP_URL = "last_dial_app_url"
+    private const val KEY_HOST_IP = "last_host_ip"
+
+    fun saveLastDevice(context: Context, device: DlnaDevice) {
+        val safeName = device.friendlyName.trim()
+        val safeControlUrl = device.controlUrl.trim()
+        val safeDialUrl = device.dialAppUrl.trim()
+        val safeHostIp = device.hostIp.trim()
+        if (safeName.isEmpty() || (!isValidHttpUrl(safeControlUrl) && !isValidHttpUrl(safeDialUrl) && safeHostIp.isEmpty())) {
+            return
+        }
+
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_NAME, safeName)
+            .putString(KEY_CONTROL_URL, safeControlUrl)
+            .putString(
+                KEY_SERVICE_TYPE,
+                device.serviceType.trim().ifBlank { "urn:schemas-upnp-org:service:AVTransport:1" }
+            )
+            .putString(KEY_DIAL_APP_URL, safeDialUrl)
+            .putString(KEY_HOST_IP, safeHostIp)
+            .apply()
+    }
+
+    fun getLastDevice(context: Context): DlnaDevice? {
+        val prefs = context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val name = prefs.getString(KEY_NAME, null)?.trim().orEmpty()
+        val controlUrl = prefs.getString(KEY_CONTROL_URL, null)?.trim().orEmpty()
+        val dialAppUrl = prefs.getString(KEY_DIAL_APP_URL, null)?.trim().orEmpty()
+        val hostIp = prefs.getString(KEY_HOST_IP, null)?.trim().orEmpty()
+
+        if (name.isEmpty() || (!isValidHttpUrl(controlUrl) && !isValidHttpUrl(dialAppUrl) && hostIp.isEmpty())) {
+            return null
+        }
+
+        val serviceType = prefs.getString(KEY_SERVICE_TYPE, null)?.trim()
+            .takeUnless { it.isNullOrEmpty() }
+            ?: "urn:schemas-upnp-org:service:AVTransport:1"
+
+        return DlnaDevice(
+            friendlyName = name,
+            controlUrl = controlUrl,
+            serviceType = serviceType,
+            dialAppUrl = dialAppUrl,
+            hostIp = hostIp
+        )
+    }
+
+    fun clearLastDevice(context: Context) {
+        context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .apply()
+    }
+
+    private fun isValidHttpUrl(url: String): Boolean {
+        return url.startsWith("http://", ignoreCase = true) ||
+            url.startsWith("https://", ignoreCase = true)
+    }
+}
+
 class DlnaController(
     private val context: Context? = null
 ) {
