@@ -35,6 +35,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -87,7 +88,6 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_LAST_URL = "last_watched_url"
         private const val KEY_LAST_TITLE = "last_watched_title"
 
-        // Casting extras
         const val EXTRA_CAST_MODE = "CAST_MODE"
         const val EXTRA_YOUTUBE_URL = "YOUTUBE_URL"
         const val EXTRA_YOUTUBE_VIDEO_ID = "YOUTUBE_VIDEO_ID"
@@ -99,14 +99,9 @@ class MainActivity : AppCompatActivity() {
         const val CAST_MODE_LOCAL = "LOCAL"
 
         private const val YOUTUBE_MOBILE_HOME_URL = "https://m.youtube.com/"
-
-        // Daily auto-refresh interval (24 hours)
         private const val DAILY_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
-
-        // India IPTV M3U playlist link (UI mein kahin nahi dikhega)
         private const val DEFAULT_PLAYLIST_URL = M3uPlaylistParser.DEFAULT_PLAYLIST_URL
 
-        // Dark Broadcast / TV Palette
         private const val BG_PRIMARY = "#070B12"
         private const val BG_GRADIENT_TOP = "#0D1524"
         private const val BG_SURFACE = "#101826"
@@ -125,6 +120,7 @@ class MainActivity : AppCompatActivity() {
     private val dlnaController by lazy {
         DlnaController(context = this)
     }
+    private val youtubeStreamSniffer = YouTubeStreamSniffer()
     private var localMediaServer: LocalMediaServer? = null
     private var castContext: CastContext? = null
 
@@ -195,7 +191,6 @@ class MainActivity : AppCompatActivity() {
         WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
         castContext = runCatching { CastContext.getSharedInstance(this) }.getOrNull()
-
         favoriteUrls = loadFavorites()
 
         val rootView = buildProfessionalUi()
@@ -259,6 +254,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         dailyTickerJob?.cancel()
         dailyTickerJob = null
+        youtubeStreamSniffer.clear()
         dlnaController.releaseLocalMediaServer()
         stopLocalRelayServer()
         super.onDestroy()
@@ -741,16 +737,22 @@ class MainActivity : AppCompatActivity() {
         castYouTubeVideoToActiveTarget(
             videoId = videoId,
             title = "YouTube ($videoId)",
-            sourceUrl = "https://www.youtube.com/watch?v=$videoId"
+            sourceUrl = "https://www.youtube.com/watch?v=$videoId",
+            capturedStream = youtubeStreamSniffer.latestStream
         )
     }
 
     private fun castYouTubeVideoToActiveTarget(
         videoId: String,
         title: String,
-        sourceUrl: String
+        sourceUrl: String,
+        capturedStream: CapturedYouTubeStream? = null
     ) {
         val ytWatchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val effectiveStream = capturedStream
+            ?: youtubeStreamSniffer.latestStream?.takeIf {
+                it.videoId == "unknown" || it.videoId == videoId
+            }
 
         saveLastWatched(url = sourceUrl, title = title)
         updateLastWatchedPill()
@@ -774,11 +776,11 @@ class MainActivity : AppCompatActivity() {
             var shouldOfferSystemCast = false
             var lastMsg = ""
 
-            if (activeCast != null) {
+            if (activeCast != null && effectiveStream != null && effectiveStream.streamUrl.isNotBlank()) {
                 val castLoaded = runCatching {
-                    val mediaInfo = MediaInfo.Builder(ytWatchUrl)
+                    val mediaInfo = MediaInfo.Builder(effectiveStream.streamUrl)
                         .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
-                        .setContentType("video/mp4")
+                        .setContentType(effectiveStream.mimeType.ifBlank { "video/mp4" })
                         .setMetadata(
                             MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
                                 putString(MediaMetadata.KEY_TITLE, title)
@@ -799,9 +801,12 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (savedDevice != null) {
-                val dlnaRes = dlnaController.playYouTubeOnDevice(
+                val dlnaRes = dlnaController.playYouTubeTubioStyle(
                     device = savedDevice,
-                    youtubeUrlOrId = videoId
+                    youtubeUrlOrId = ytWatchUrl,
+                    capturedStream = effectiveStream,
+                    fallbackTitle = title,
+                    fallbackMimeType = effectiveStream?.mimeType ?: "video/mp4"
                 )
                 if (dlnaRes.success) {
                     anySuccess = true
@@ -836,6 +841,7 @@ class MainActivity : AppCompatActivity() {
     // ==================== IN-APP YOUTUBE BROWSER ====================
 
     private fun triggerDirectYouTubeFlow() {
+        youtubeStreamSniffer.clear()
         openYouTubeBrowserScreen(initialUrl = YOUTUBE_MOBILE_HOME_URL, title = "YouTube")
     }
 
@@ -940,6 +946,11 @@ class MainActivity : AppCompatActivity() {
                     progress.progress = newProgress
                     progress.visibility = if (newProgress in 1..99) View.VISIBLE else View.GONE
                 }
+
+                override fun onReceivedTitle(view: WebView?, pageTitle: String?) {
+                    super.onReceivedTitle(view, pageTitle)
+                    youtubeStreamSniffer.onPageTitleUpdated(view?.url, pageTitle)
+                }
             }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(
@@ -951,6 +962,24 @@ class MainActivity : AppCompatActivity() {
                         return false
                     }
                     return true
+                }
+
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    val reqUrl = request?.url?.toString().orEmpty()
+                    if (reqUrl.isNotEmpty()) {
+                        val pageUrl = runCatching { view?.url }.getOrNull()
+                        val pageTitle = runCatching { view?.title }.getOrNull()
+                        youtubeStreamSniffer.inspectRequest(
+                            pageUrl = pageUrl,
+                            requestUrl = reqUrl,
+                            headers = request?.requestHeaders,
+                            currentTitle = pageTitle
+                        )
+                    }
+                    return super.shouldInterceptRequest(view, request)
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -967,9 +996,11 @@ class MainActivity : AppCompatActivity() {
                     val current = url.orEmpty()
                     if (current.isNotEmpty()) {
                         tvUrl.text = current
+                        val pageTitle = view?.title?.takeIf { it.isNotBlank() } ?: title
+                        youtubeStreamSniffer.onPageTitleUpdated(current, pageTitle)
                         saveLastWatched(
                             url = current,
-                            title = view?.title?.takeIf { it.isNotBlank() } ?: title
+                            title = pageTitle
                         )
                         updateLastWatchedPill()
                     }
@@ -980,9 +1011,11 @@ class MainActivity : AppCompatActivity() {
                     val current = url.orEmpty()
                     if (current.isNotEmpty()) {
                         tvUrl.text = current
+                        val pageTitle = view?.title?.takeIf { it.isNotBlank() } ?: title
+                        youtubeStreamSniffer.onPageTitleUpdated(current, pageTitle)
                         saveLastWatched(
                             url = current,
-                            title = view?.title?.takeIf { it.isNotBlank() } ?: title
+                            title = pageTitle
                         )
                         updateLastWatchedPill()
                     }
@@ -1067,7 +1100,8 @@ class MainActivity : AppCompatActivity() {
             castYouTubeVideoToActiveTarget(
                 videoId = videoId,
                 title = currentTitle,
-                sourceUrl = currentUrl
+                sourceUrl = currentUrl,
+                capturedStream = youtubeStreamSniffer.latestStream
             )
         }
 
@@ -1552,6 +1586,8 @@ class MainActivity : AppCompatActivity() {
             if (savedDevice != null) {
                 putExtra("DLNA_DEVICE_NAME", savedDevice.friendlyName)
                 putExtra("DLNA_CONTROL_URL", savedDevice.controlUrl)
+                putExtra("DLNA_DIAL_APP_URL", savedDevice.dialAppUrl)
+                putExtra("DLNA_HOST_IP", savedDevice.hostIp)
             }
         }
         startActivity(intent)
