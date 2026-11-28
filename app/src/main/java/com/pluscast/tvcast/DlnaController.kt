@@ -131,6 +131,13 @@ class YouTubeStreamSniffer {
         )
     }
 
+    fun clearIfDifferentVideo(newVideoId: String?) {
+        val current = latestStream ?: return
+        if (newVideoId.isNullOrBlank() || (current.videoId != "unknown" && current.videoId != newVideoId)) {
+            latestStream = null
+        }
+    }
+
     fun clear() {
         latestStream = null
     }
@@ -251,7 +258,10 @@ class DlnaController(
         private val YT_ID_REGEX = Regex("^[a-zA-Z0-9_-]{11}$")
     }
 
+    @Volatile
     private var localMediaServer: LocalMediaHttpServer? = null
+
+    @Volatile
     private var remoteStreamServer: RemoteStreamHttpServer? = null
 
     suspend fun discoverRenderers(timeoutMs: Int = 5000): List<DlnaDevice> =
@@ -647,7 +657,7 @@ class DlnaController(
                 return@withContext DlnaPlayResult(
                     success = false,
                     message = "${resolvedDevice.friendlyName} par YouTube stream play nahi ho saka (${proxyResult.message})",
-                    suggestSystemCast = false
+                    suggestSystemCast = true
                 )
             }
         }
@@ -659,7 +669,7 @@ class DlnaController(
             } else {
                 "${resolvedDevice.friendlyName} par YouTube DIAL aur DLNA stream dono play nahi ho sake."
             },
-            suggestSystemCast = resolvedDevice.controlUrl.isBlank()
+            suggestSystemCast = true
         )
     }
 
@@ -1070,7 +1080,7 @@ class DlnaController(
         val playRes = sendPlayAction(controlUrl, serviceUrn)
         if (!playRes.success) return playRes
 
-        delay(1200)
+        delay(2200)
         val transportState = queryTransportState(controlUrl, serviceUrn)
         Log.d(TAG, "Post-Play TransportState on $controlUrl -> $transportState")
         if (transportState.equals("STOPPED", ignoreCase = true) ||
@@ -1078,7 +1088,8 @@ class DlnaController(
         ) {
             return DlnaPlayResult(
                 false,
-                "Renderer stream decode/play nahi kar paya ($transportState)"
+                "Renderer stream decode/play nahi kar paya ($transportState)",
+                suggestSystemCast = true
             )
         }
 
