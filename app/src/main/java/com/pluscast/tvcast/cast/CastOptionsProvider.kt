@@ -56,32 +56,39 @@ class CastOptionsProvider : OptionsProvider {
             return null
         }
 
+        fun isWatchPageUrl(url: String): Boolean {
+            val lower = url.trim().lowercase(Locale.US)
+            return lower.contains("youtube.com/watch") ||
+                lower.contains("youtu.be/") ||
+                lower.contains("youtube.com/shorts/") ||
+                lower.contains("youtube.com/live/")
+        }
+
         fun buildYouTubeMediaLoadRequest(
-            youtubeUrlOrId: String,
-            title: String = "YouTube Video"
+            playableStreamUrlOrId: String,
+            title: String = "YouTube Video",
+            mimeType: String = "video/mp4"
         ): MediaLoadRequestData? {
-            val trimmed = youtubeUrlOrId.trim()
-            if (trimmed.isEmpty()) return null
-
-            val videoId = extractYouTubeVideoId(trimmed)
-            val watchUrl = when {
-                trimmed.startsWith("http://", ignoreCase = true) ||
-                    trimmed.startsWith("https://", ignoreCase = true) -> trimmed
-                videoId != null -> "https://www.youtube.com/watch?v=$videoId"
-                else -> return null
+            val trimmed = playableStreamUrlOrId.trim()
+            if (trimmed.isEmpty() || isWatchPageUrl(trimmed) || YT_ID_REGEX.matches(trimmed)) {
+                return null
+            }
+            if (!trimmed.startsWith("http://", ignoreCase = true) &&
+                !trimmed.startsWith("https://", ignoreCase = true)
+            ) {
+                return null
             }
 
-            val resolvedTitle = title.trim().ifEmpty {
-                videoId?.let { "YouTube ($it)" } ?: "YouTube Video"
-            }
+            val resolvedTitle = title.trim().ifEmpty { "YouTube Video" }
+            val resolvedMime = mimeType.trim().ifEmpty { "video/mp4" }
 
             val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
                 putString(MediaMetadata.KEY_TITLE, resolvedTitle)
             }
 
-            val mediaInfo = MediaInfo.Builder(watchUrl)
+            val mediaInfo = MediaInfo.Builder(trimmed)
                 .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
-                .setContentType("video/mp4")
+                .setContentType(resolvedMime)
                 .setMetadata(metadata)
                 .build()
 
