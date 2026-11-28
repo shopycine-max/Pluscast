@@ -28,7 +28,7 @@
         android:usesCleartextTraffic="true"
         tools:targetApi="34">
 
-        <!-- Google Cast Options Provider (agar CastOptionsProvider class maujood ho) -->
+        <!-- Google Cast Options Provider (ensure com.pluscast.tvcast.cast.CastOptionsProvider exists) -->
         <meta-data
             android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
             android:value="com.pluscast.tvcast.cast.CastOptionsProvider" />
