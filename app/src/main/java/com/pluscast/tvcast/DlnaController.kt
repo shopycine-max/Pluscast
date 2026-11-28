@@ -89,9 +89,22 @@ class YouTubeStreamSniffer {
         }
         if (!isPlayableYouTubeMediaUrl(url)) return
 
+        val lower = url.lowercase(Locale.US)
+        val isMp4 = lower.contains("mime=video%2fmp4") || lower.contains("mime=video/mp4")
+
+        val existing = latestStream
         val videoId = pageUrl?.let { extractVideoId(it) }
-            ?: latestStream?.videoId
+            ?: existing?.videoId
             ?: "unknown"
+
+        // Agar pehle se usi video ke liye MP4 stream mil chuki hai, to non-MP4 se overwrite na karein
+        if (existing != null &&
+            existing.videoId == videoId &&
+            existing.mimeType == "video/mp4" &&
+            !isMp4
+        ) {
+            return
+        }
 
         val cookie = runCatching { CookieManager.getInstance().getCookie(url) }.getOrNull().orEmpty()
         val ua = headers?.entries?.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
@@ -101,9 +114,9 @@ class YouTubeStreamSniffer {
             ?: "https://m.youtube.com/"
 
         val mime = when {
-            url.contains("mime=video%2Fwebm", ignoreCase = true) ||
-                url.contains("mime=video/webm", ignoreCase = true) -> "video/webm"
-            url.contains(".m3u8", ignoreCase = true) -> "application/x-mpegURL"
+            isMp4 -> "video/mp4"
+            lower.contains("mime=video%2fwebm") || lower.contains("mime=video/webm") -> "video/webm"
+            lower.contains(".m3u8") -> "application/x-mpegURL"
             else -> "video/mp4"
         }
 
@@ -492,7 +505,6 @@ class DlnaController(
             )
         }
 
-        // 1. Pehle direct DLNA try karein
         val directResult = playMediaOnDevice(
             device = resolvedDevice,
             mediaUrl = cleanUrl,
@@ -503,7 +515,6 @@ class DlnaController(
             return@withContext directResult
         }
 
-        // 2. Agar direct fail ho (jaise HTTPS ya header-protected IPTV channel), to local HTTP relay proxy se try karein
         Log.w(TAG, "Direct DLNA failed for $title (${directResult.message}), trying local HTTP relay")
         val proxyResult = playViaLocalRelay(
             device = resolvedDevice,
@@ -563,7 +574,7 @@ class DlnaController(
 
         remoteStreamServer = server
         val proxyUrl = "http://$localIp:$port/stream"
-        Log.d(TAG, "Relay URL: $proxyUrl -> target=$remoteUrl")
+        Log.d(TAG, "Relay URL: $proxyUrl | mime=$mimeType | target=$remoteUrl")
 
         val result = playMediaOnDevice(
             device = device,
@@ -596,7 +607,6 @@ class DlnaController(
                 suggestSystemCast = false
             )
 
-        // 1. Pehle DIAL se TV/STB ke YouTube app mein video launch try karein
         val dialCandidates = resolveDialBaseUrls(resolvedDevice)
         Log.d(TAG, "Tubio-style YouTube -> DIAL check | videoId=$videoId | candidates=$dialCandidates")
 
@@ -610,14 +620,13 @@ class DlnaController(
             }
         }
 
-        // 2. DIAL fail ho to captured stream ko local HTTP proxy + DLNA AVTransport se play karein
         val matchingStream = capturedStream?.takeIf {
             it.videoId == "unknown" || it.videoId == videoId
         }
         val cleanStreamUrl = matchingStream?.streamUrl?.trim().orEmpty()
 
         if (isValidHttpUrl(cleanStreamUrl) && resolvedDevice.controlUrl.isNotBlank()) {
-            Log.d(TAG, "Tubio-style YouTube -> DIAL unavailable, trying DLNA proxy for captured stream")
+            Log.d(TAG, "Tubio-style YouTube -> DIAL unavailable, trying DLNA proxy for captured stream (mime=${matchingStream?.mimeType})")
             val proxyResult = playCapturedYouTubeStream(
                 device = resolvedDevice,
                 streamUrl = cleanStreamUrl,
@@ -634,14 +643,19 @@ class DlnaController(
                     message = "${resolvedDevice.friendlyName} par YouTube stream play ho raha hai",
                     suggestSystemCast = false
                 )
+            } else {
+                return@withContext DlnaPlayResult(
+                    success = false,
+                    message = "${resolvedDevice.friendlyName} par YouTube stream play nahi ho saka (${proxyResult.message})",
+                    suggestSystemCast = false
+                )
             }
         }
 
-        // 3. Dono fail hon to clear guidance dein
         return@withContext DlnaPlayResult(
             success = false,
             message = if (cleanStreamUrl.isBlank()) {
-                "${resolvedDevice.friendlyName} par YouTube stream/app play nahi ho saka. Video ko WebView mein play karke stream load hone dein ya YT App button try karein."
+                "${resolvedDevice.friendlyName} par YouTube stream/app play nahi ho saka. Video ko WebView mein play karke stream load hone dein."
             } else {
                 "${resolvedDevice.friendlyName} par YouTube DIAL aur DLNA stream dono play nahi ho sake."
             },
@@ -1053,7 +1067,22 @@ class DlnaController(
         }
 
         delay(350)
-        return sendPlayAction(controlUrl, serviceUrn)
+        val playRes = sendPlayAction(controlUrl, serviceUrn)
+        if (!playRes.success) return playRes
+
+        delay(1200)
+        val transportState = queryTransportState(controlUrl, serviceUrn)
+        Log.d(TAG, "Post-Play TransportState on $controlUrl -> $transportState")
+        if (transportState.equals("STOPPED", ignoreCase = true) ||
+            transportState.equals("NO_MEDIA_PRESENT", ignoreCase = true)
+        ) {
+            return DlnaPlayResult(
+                false,
+                "Renderer stream decode/play nahi kar paya ($transportState)"
+            )
+        }
+
+        return DlnaPlayResult(true, "Playing")
     }
 
     private fun sendStopAction(controlUrl: String, serviceUrn: String) {
@@ -1098,6 +1127,45 @@ class DlnaController(
         } else {
             DlnaPlayResult(true, "Playing")
         }
+    }
+
+    private fun queryTransportState(controlUrl: String, serviceUrn: String): String {
+        val soapBody = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+              <s:Body>
+                <u:GetTransportInfo xmlns:u="$serviceUrn">
+                  <InstanceID>0</InstanceID>
+                </u:GetTransportInfo>
+              </s:Body>
+            </s:Envelope>
+        """.trimIndent()
+
+        return runCatching {
+            var connection: HttpURLConnection? = null
+            try {
+                val conn = (URL(controlUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 2500
+                    readTimeout = 2500
+                    requestMethod = "POST"
+                    doOutput = true
+                    instanceFollowRedirects = false
+                    setRequestProperty("User-Agent", USER_AGENT)
+                    setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"")
+                    setRequestProperty("SOAPAction", "\"$serviceUrn#GetTransportInfo\"")
+                }
+                connection = conn
+                OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
+                    writer.write(soapBody)
+                    writer.flush()
+                }
+                if (conn.responseCode !in 200..299) return "UNKNOWN"
+                val respXml = conn.inputStream.bufferedReader(Charsets.UTF_8).use(BufferedReader::readText)
+                extractTagValue(respXml, "CurrentTransportState")?.trim().orEmpty().ifBlank { "UNKNOWN" }
+            } finally {
+                connection?.disconnect()
+            }
+        }.getOrDefault("UNKNOWN")
     }
 
     private fun isYouTubeInput(input: String): Boolean {
@@ -1496,6 +1564,7 @@ class DlnaController(
                         }
                         upstream = conn
                         val code = conn.responseCode
+                        Log.d(TAG, "Relay $method range=${rangeHeader ?: "-"} -> upstream HTTP $code")
                         if (code !in 200..299 && code != 206) {
                             writeSimpleResponse(client, "502 Bad Gateway", "Upstream HTTP $code")
                             return
