@@ -320,12 +320,12 @@ class DlnaController(
             }
 
             val searchTargets = listOf(
-                "urn:dial-multiscreen-org:service:dial:1",
-                "urn:dial-multiscreen-org:device:dial:1",
-                "roku:ecp",
                 "urn:schemas-upnp-org:device:MediaRenderer:1",
                 "urn:schemas-upnp-org:service:AVTransport:1",
                 "urn:schemas-upnp-org:service:AVTransport:2",
+                "urn:dial-multiscreen-org:service:dial:1",
+                "urn:dial-multiscreen-org:device:dial:1",
+                "roku:ecp",
                 "upnp:rootdevice"
             )
 
@@ -668,10 +668,10 @@ class DlnaController(
 
         // 1. Roku ECP launch
         if (resolvedDevice.supportsRoku && tryLaunchYouTubeViaRokuEcp(resolvedDevice, videoId)) {
-            delay(1200)
+            delay(1000)
             return@withContext DlnaPlayResult(
                 success = true,
-                message = "${resolvedDevice.friendlyName} (Roku) ke YouTube app mein video play ho raha hai",
+                message = "${resolvedDevice.friendlyName} (Roku) par YouTube play ho raha hai",
                 protocolUsed = CastProtocol.ROKU_ECP,
                 suggestSystemCast = false
             )
@@ -683,29 +683,28 @@ class DlnaController(
 
         for (dialBase in dialCandidates) {
             if (tryLaunchYouTubeViaDial(dialBase, videoId)) {
-                delay(1200)
+                delay(1000)
                 return@withContext DlnaPlayResult(
                     success = true,
-                    message = "${resolvedDevice.friendlyName} ke YouTube app mein video play ho raha hai",
+                    message = "${resolvedDevice.friendlyName} ke YouTube app mein play ho raha hai",
                     protocolUsed = CastProtocol.DIAL,
                     suggestSystemCast = false
                 )
             }
         }
 
-        // 3. Direct DLNA play (Tubio style: captured stream ya relay ke zariye AVTransport)
+        // 3. Tubio-style DLNA play (Direct DLNA -> Local HTTP Relay DLNA)
         val matchingStream = capturedStream?.takeIf {
             it.videoId == "unknown" || it.videoId == videoId
         }
         val cleanStreamUrl = matchingStream?.streamUrl?.trim().orEmpty()
 
         if (isValidHttpUrl(cleanStreamUrl) && resolvedDevice.controlUrl.isNotBlank()) {
-            Log.d(TAG, "DIAL unavailable; trying direct DLNA play for stream: $cleanStreamUrl")
+            Log.d(TAG, "DIAL unavailable; trying DLNA for stream: $cleanStreamUrl")
             val streamTitle = matchingStream?.title?.trim()?.takeIf { it.isNotEmpty() }
                 ?: fallbackTitle.trim().ifEmpty { "YouTube Video ($videoId)" }
             val streamMime = matchingStream?.mimeType?.ifBlank { fallbackMimeType } ?: fallbackMimeType
 
-            // Pehle direct DLNA URL bhej kar try karein, fail ho toh local HTTP relay se DLNA try karein
             val directDlna = playMediaOnDevice(
                 device = resolvedDevice,
                 mediaUrl = cleanStreamUrl,
@@ -715,7 +714,7 @@ class DlnaController(
             if (directDlna.success) {
                 return@withContext DlnaPlayResult(
                     success = true,
-                    message = "${resolvedDevice.friendlyName} par DLNA se video play ho raha hai",
+                    message = "${resolvedDevice.friendlyName} par DLNA se play ho raha hai",
                     protocolUsed = CastProtocol.DLNA_UPNP,
                     suggestSystemCast = false
                 )
@@ -733,7 +732,7 @@ class DlnaController(
             if (proxyResult.success) {
                 return@withContext DlnaPlayResult(
                     success = true,
-                    message = "${resolvedDevice.friendlyName} par DLNA relay se video play ho raha hai",
+                    message = "${resolvedDevice.friendlyName} par DLNA relay se play ho raha hai",
                     protocolUsed = CastProtocol.DLNA_UPNP,
                     suggestSystemCast = false
                 )
@@ -1148,7 +1147,7 @@ class DlnaController(
         val escapedUrl = escapeXml(mediaUrl)
         val escapedTitle = escapeXml(title)
         val escapedMime = escapeXml(mimeType)
-        val protocolInfo = "http-get:*:$escapedMime:*"
+        val protocolInfo = "http-get:*:$escapedMime:DLNA.ORG_OP=01;DLNA.ORG_CI=0"
 
         val didl =
             """<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="0" parentID="-1" restricted="1"><dc:title>$escapedTitle</dc:title><upnp:class>$upnpClass</upnp:class><res protocolInfo="$protocolInfo">$escapedUrl</res></item></DIDL-Lite>"""
@@ -1702,6 +1701,7 @@ class DlnaController(
                         val contentLength = conn.contentLengthLong
                         val contentRange = conn.getHeaderField("Content-Range")
                         val acceptRanges = conn.getHeaderField("Accept-Ranges") ?: "bytes"
+                        val useChunked = method != "HEAD" && contentLength < 0L && contentRange.isNullOrBlank()
 
                         val headerBuilder = StringBuilder().apply {
                             append("HTTP/1.1 $code ${if (code == 206) "Partial Content" else "OK"}\r\n")
@@ -1712,6 +1712,8 @@ class DlnaController(
                             }
                             if (contentLength >= 0L) {
                                 append("Content-Length: $contentLength\r\n")
+                            } else if (useChunked) {
+                                append("Transfer-Encoding: chunked\r\n")
                             }
                             append("Connection: close\r\n\r\n")
                         }
@@ -1727,7 +1729,17 @@ class DlnaController(
                             while (running.get()) {
                                 val read = input.read(buffer)
                                 if (read <= 0) break
-                                out.write(buffer, 0, read)
+                                if (useChunked) {
+                                    val chunkHex = Integer.toHexString(read) + "\r\n"
+                                    out.write(chunkHex.toByteArray(Charsets.ISO_8859_1))
+                                    out.write(buffer, 0, read)
+                                    out.write("\r\n".toByteArray(Charsets.ISO_8859_1))
+                                } else {
+                                    out.write(buffer, 0, read)
+                                }
+                            }
+                            if (useChunked) {
+                                out.write("0\r\n\r\n".toByteArray(Charsets.ISO_8859_1))
                             }
                             out.flush()
                         }
